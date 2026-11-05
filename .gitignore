@@ -1,0 +1,17 @@
+# Kecualikan folder groq (hanya push proyek elevenlabs)
+groq/
+
+# Hasil generasi audio & riwayat lokal ElevenLabs
+elevenlabs/outputs/
+outputs/
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
