@@ -450,48 +450,14 @@ def _extract_time_ranges_from_col_lines(
     return col_time_lines
 
 
-def _parse_pdf_via_pdftotext_bbox(pdf_bytes: bytes) -> List[Dict[str, str]]:
+def _extract_storyboard_from_pages_words(
+    pages_words: List[List[Tuple[float, float, float, float, str]]]
+) -> List[Dict[str, str]]:
     """
-    Mengekstrak tabel Storyboard 3 kolom (Estimasi Waktu | Arahan Visual | Naskah Voice Over)
-    atau 2 kolom dari PDF menggunakan `pdftotext -bbox`.
-    Menangani PDF dengan durasi 1 baris maupun durasi yang terpotong menjadi 2 baris ('00:00:00 -\\n00:00:05').
+    Ekstraktor inti matriks kata berkoordinat (ymin, xmin, xmax, ymax, w_txt) per halaman.
+    Mendeteksi kolom tabel Storyboard (Estimasi Waktu | Arahan Visual | Naskah Voice Over)
+    berdasarkan posisi horizontal xMin dan vertikal yMin.
     """
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
-            tmp.write(pdf_bytes)
-            tmp.flush()
-            res = subprocess.run(
-                ["pdftotext", "-bbox", tmp.name, "-"],
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
-        if res.returncode != 0 or not res.stdout:
-            return []
-    except Exception:
-        return []
-
-    word_pattern = re.compile(
-        r'<word\s+xMin="([\d.]+)"\s+yMin="([\d.]+)"\s+xMax="([\d.]+)"\s+yMax="([\d.]+)">(.*?)</word>'
-    )
-
-    pages_words: List[List[Tuple[float, float, float, float, str]]] = []
-    for page_block in res.stdout.split("<page "):
-        if "</page>" not in page_block:
-            continue
-        words = []
-        for m in word_pattern.finditer(page_block):
-            xmin, ymin, xmax, ymax = (
-                float(m.group(1)),
-                float(m.group(2)),
-                float(m.group(3)),
-                float(m.group(4)),
-            )
-            w_txt = html.unescape(m.group(5)).strip()
-            if w_txt:
-                words.append((ymin, xmin, xmax, ymax, w_txt))
-        pages_words.append(words)
-
     if not pages_words:
         return []
 
@@ -507,6 +473,7 @@ def _parse_pdf_via_pdftotext_bbox(pdf_bytes: bytes) -> List[Dict[str, str]]:
                 "estimasi waktu" in low
                 or ("arahan visual" in low and "naskah" in low)
                 or ("adegan video" in low and "audio" in low)
+                or ("visual" in low and ("voice" in low or "naskah" in low))
             )
             if is_hdr_row:
                 if p_idx not in header_y_by_page or y_ln < header_y_by_page[p_idx]:
@@ -516,11 +483,11 @@ def _parse_pdf_via_pdftotext_bbox(pdf_bytes: bytes) -> List[Dict[str, str]]:
                     key=lambda x: x[0],
                 )
                 for xmin, w_low in hdr_words_sorted:
-                    if w_low in ("arahan", "visual") and xmin > 70.0:
+                    if w_low in ("arahan", "visual", "adegan", "video") and xmin > 70.0:
                         vis_header_xmins.append(xmin)
                         break
                 for xmin, w_low in hdr_words_sorted:
-                    if w_low in ("naskah", "voice", "narasi") and xmin > (min(vis_header_xmins) + 30.0 if vis_header_xmins else 200.0):
+                    if w_low in ("naskah", "voice", "narasi", "audio", "dialog") and xmin > (min(vis_header_xmins) + 30.0 if vis_header_xmins else 200.0):
                         vo_header_xmins.append(xmin)
                         break
 
@@ -535,7 +502,7 @@ def _parse_pdf_via_pdftotext_bbox(pdf_bytes: bytes) -> List[Dict[str, str]]:
         right_words = sum(
             1 for words in pages_words for _, xmin, _, _, _ in words if xmin >= x_vo_start
         )
-        if mid_words >= 4 and right_words >= 4:
+        if mid_words >= 1 and right_words >= 1:
             has_visual_col = True
 
     segments: List[Dict[str, Any]] = []
@@ -615,33 +582,151 @@ def _parse_pdf_via_pdftotext_bbox(pdf_bytes: bytes) -> List[Dict[str, str]]:
     return result_rows
 
 
-def parse_pdf_storyboard(pdf_bytes: bytes) -> List[Dict[str, str]]:
+def _parse_pdf_via_pdftotext_bbox(pdf_bytes: bytes) -> List[Dict[str, str]]:
     """
-    Mengekstrak tabel naskah Voice Over dari file PDF dan menstandarkan durasi ke HH:MM:SS - HH:MM:SS.
-    Menggunakan `pdftotext -bbox` sebagai metode utama, dan fallback ke `pdftotext` teks / `pypdf`.
+    Mengekstrak tabel Storyboard 3 kolom (Estimasi Waktu | Arahan Visual | Naskah Voice Over)
+    menggunakan `pdftotext -bbox` (poppler-utils).
     """
-    # 1. Coba ekstraksi koordinat presisi dengan pdftotext -bbox
-    rows = _parse_pdf_via_pdftotext_bbox(pdf_bytes)
-    if rows:
-        return rows
-
-    # 2. Fallback: Ekstrak teks dengan pdftotext atau pypdf lalu jalankan parser teks
-    extracted_text = ""
     try:
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
             tmp.write(pdf_bytes)
             tmp.flush()
-            res = subprocess.run(["pdftotext", tmp.name, "-"], capture_output=True, text=True, timeout=15)
-            if res.returncode == 0 and res.stdout.strip():
-                extracted_text = res.stdout
+            res = subprocess.run(
+                ["pdftotext", "-bbox", tmp.name, "-"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        if res.returncode != 0 or not res.stdout:
+            return []
+    except Exception:
+        return []
+
+    word_pattern = re.compile(
+        r'<word\s+xMin="([\d.]+)"\s+yMin="([\d.]+)"\s+xMax="([\d.]+)"\s+yMax="([\d.]+)">(.*?)</word>'
+    )
+
+    pages_words: List[List[Tuple[float, float, float, float, str]]] = []
+    for page_block in res.stdout.split("<page "):
+        if "</page>" not in page_block:
+            continue
+        words = []
+        for m in word_pattern.finditer(page_block):
+            xmin, ymin, xmax, ymax = (
+                float(m.group(1)),
+                float(m.group(2)),
+                float(m.group(3)),
+                float(m.group(4)),
+            )
+            w_txt = html.unescape(m.group(5)).strip()
+            if w_txt:
+                words.append((ymin, xmin, xmax, ymax, w_txt))
+        pages_words.append(words)
+
+    if not pages_words:
+        return []
+
+    return _extract_storyboard_from_pages_words(pages_words)
+
+
+def _parse_pdf_via_pypdf_coords(pdf_bytes: bytes) -> List[Dict[str, str]]:
+    """
+    Fallback ekstraksi koordinat presisi langsung via pustaka Python `pypdf` (visitor_text)
+    tanpa memerlukan subprocess binary eksternal.
+    """
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        pages_words: List[List[Tuple[float, float, float, float, str]]] = []
+
+        for page in reader.pages:
+            words: List[Tuple[float, float, float, float, str]] = []
+            page_h = float(getattr(page.mediabox, "height", 792.0) or 792.0)
+
+            def visitor_body(text, cm, tm, font_dict, font_size):
+                if not text:
+                    return
+                # tm adalah matriks transformasi teks [a, b, c, d, e, f]
+                # e (tm[4]) adalah koordinat x horizontal dari kiri
+                # f (tm[5]) adalah koordinat y vertikal dari bawah ke atas
+                tx = float(tm[4]) if len(tm) > 4 else 0.0
+                ty = float(tm[5]) if len(tm) > 5 else 0.0
+                ymin = max(0.0, page_h - ty)
+                fs = float(font_size or 10.0)
+                cur_x = tx
+                char_w = max(4.0, fs * 0.5)
+                for token in text.split():
+                    clean_t = token.strip()
+                    if clean_t:
+                        w_len = len(clean_t) * char_w
+                        words.append((ymin, cur_x, cur_x + w_len, ymin + fs, clean_t))
+                        cur_x += w_len + char_w
+
+            try:
+                page.extract_text(visitor_text=visitor_body)
+            except Exception:
+                pass
+
+            if words:
+                pages_words.append(words)
+
+        if not pages_words:
+            return []
+        return _extract_storyboard_from_pages_words(pages_words)
+    except Exception:
+        return []
+
+
+def parse_pdf_storyboard(pdf_bytes: bytes) -> List[Dict[str, str]]:
+    """
+    Mengekstrak tabel naskah Voice Over dari file PDF dan menstandarkan durasi ke HH:MM:SS - HH:MM:SS.
+    Dukungan Multi-Tier:
+    1. Ekstraksi koordinat presisi via pdftotext -bbox (memerlukan poppler-utils)
+    2. Ekstraksi koordinat presisi via pypdf visitor_text
+    3. Ekstraksi teks layout-mode via pypdf / pdftotext
+    4. Parser naskah fleksibel ber-delimiter (Pipe |, Tab \\t, Multi-Spasi)
+    """
+    # 1. Coba ekstraksi koordinat presisi dengan pdftotext -bbox (poppler-utils)
+    rows = _parse_pdf_via_pdftotext_bbox(pdf_bytes)
+    if rows:
+        return rows
+
+    # 2. Coba ekstraksi koordinat presisi via pypdf visitor_text
+    rows = _parse_pdf_via_pypdf_coords(pdf_bytes)
+    if rows:
+        return rows
+
+    # 3. Fallback: Ekstrak teks dengan layout mode
+    extracted_text = ""
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        extracted_text = "\n".join(
+            (page.extract_text(extraction_mode="layout") or page.extract_text() or "")
+            for page in reader.pages
+        )
     except Exception:
         pass
 
     if not extracted_text:
         try:
-            import pypdf
-            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-            extracted_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
+                tmp.write(pdf_bytes)
+                tmp.flush()
+                res = subprocess.run(["pdftotext", "-layout", tmp.name, "-"], capture_output=True, text=True, timeout=15)
+                if res.returncode == 0 and res.stdout.strip():
+                    extracted_text = res.stdout
+        except Exception:
+            pass
+
+    if not extracted_text:
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
+                tmp.write(pdf_bytes)
+                tmp.flush()
+                res = subprocess.run(["pdftotext", tmp.name, "-"], capture_output=True, text=True, timeout=15)
+                if res.returncode == 0 and res.stdout.strip():
+                    extracted_text = res.stdout
         except Exception:
             pass
 
@@ -986,18 +1071,44 @@ def parse_raw_timeline_text(raw_text: str, auto_generate_if_no_timestamps: bool 
     pending_text: Optional[str] = None
     pending_visual: str = ""
     pending_range: Optional[str] = None
+    pending_content_lines: List[str] = []
 
     def flush_pending():
-        nonlocal pending_text, pending_visual, pending_range
-        if pending_text and pending_range:
-            segments.append({
-                "time_range": normalize_to_hms_range(pending_range),
-                "visual": pending_visual.strip(),
-                "text": re.sub(r"\s+", " ", pending_text).strip(),
-            })
-            pending_text = None
-            pending_visual = ""
-            pending_range = None
+        nonlocal pending_text, pending_visual, pending_range, pending_content_lines
+        if pending_range:
+            # Jika belum ada pemisahan eksplisit antara visual dan audio, evaluasi pending_content_lines
+            if not pending_visual and pending_content_lines:
+                if len(pending_content_lines) >= 2:
+                    pending_visual = pending_content_lines[0]
+                    pending_text = " ".join(pending_content_lines[1:])
+                elif len(pending_content_lines) == 1:
+                    single = pending_content_lines[0]
+                    pts = []
+                    if "|" in single:
+                        pts = [p.strip() for p in single.split("|") if p.strip()]
+                    elif "\t" in single:
+                        pts = [p.strip() for p in single.split("\t") if p.strip()]
+                    elif re.search(r"[ \t]{2,}", single):
+                        pts = [p.strip() for p in re.split(r"[ \t]{2,}", single) if p.strip()]
+
+                    if len(pts) >= 2:
+                        pending_visual = pts[0]
+                        pending_text = " ".join(pts[1:])
+                    else:
+                        pending_text = single
+            elif pending_content_lines and not pending_text:
+                pending_text = " ".join(pending_content_lines)
+
+            if pending_text or pending_visual:
+                segments.append({
+                    "time_range": normalize_to_hms_range(pending_range),
+                    "visual": (pending_visual or "").strip(),
+                    "text": re.sub(r"\s+", " ", pending_text or "").strip(),
+                })
+        pending_text = None
+        pending_visual = ""
+        pending_range = None
+        pending_content_lines = []
 
     for ln in lines:
         if _is_table_header_or_meta_text(ln) and TIME_RANGE_REGEX.search(ln) is None:
@@ -1040,29 +1151,32 @@ def parse_raw_timeline_text(raw_text: str, auto_generate_if_no_timestamps: bool 
             rest = ln[m_line.end() :].strip(" :|-–—\t")
             rest = re.sub(r"^\(detik.*?\)\s*", "", rest, flags=re.IGNORECASE).strip(" :|-–—\t")
 
-            if "|" in rest:
-                parts = [p.strip() for p in rest.split("|") if p.strip()]
+            pending_range = t_range_fmt
+            if rest:
+                # Periksa apakah rest memiliki pembatas kolom (| atau \t atau 2+ spasi)
+                parts = []
+                if "|" in rest:
+                    parts = [p.strip() for p in rest.split("|") if p.strip()]
+                elif "\t" in rest:
+                    parts = [p.strip() for p in rest.split("\t") if p.strip()]
+                elif re.search(r"[ \t]{2,}", rest):
+                    parts = [p.strip() for p in re.split(r"[ \t]{2,}", rest) if p.strip()]
+
                 if len(parts) >= 2:
-                    vis_part = parts[0]
-                    vo_part = " ".join(parts[1:])
+                    pending_visual = parts[0]
+                    pending_text = " ".join(parts[1:])
                 else:
-                    vis_part = ""
-                    vo_part = parts[0] if parts else ""
-                pending_range = t_range_fmt
-                pending_visual = vis_part
-                pending_text = vo_part
-            elif rest:
-                pending_range = t_range_fmt
-                pending_text = rest
-            else:
-                pending_range = t_range_fmt
+                    pending_content_lines.append(rest)
             continue
 
-        # Baris lanjutan
-        if pending_text is not None:
-            pending_text += " " + ln
-        elif pending_range is not None:
-            pending_text = ln
+        # Baris lanjutan di bawah rentang waktu
+        if pending_range is not None:
+            if pending_text is not None:
+                pending_text += " " + ln
+            elif pending_visual:
+                pending_text = ln
+            else:
+                pending_content_lines.append(ln)
 
     flush_pending()
 
