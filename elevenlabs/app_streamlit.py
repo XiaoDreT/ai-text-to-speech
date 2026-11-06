@@ -958,6 +958,11 @@ with tab_timeline:
             # Expander tertutup secara default agar hemat hardware video decoding surface di browser
             with st.expander("📺 Buka Pemutar Video Dubbing di Sini (Opsional)", expanded=False):
                 st.video(dub_vpath)
+        elif st.session_state.get("active_video_path"):
+            st.warning(
+                "⚠️ Video acuan terdeteksi, namun proses penggabungan video (dubbing) tidak menghasilkan file video. "
+                "Sistem membutuhkan FFmpeg aktif untuk menggabungkan audio dan video."
+            )
 
         # Opsi Unduh Terpadu On-Demand (Mengirim 1 file saja saat dipilih, tidak membebani WebSocket)
         st.markdown("---")

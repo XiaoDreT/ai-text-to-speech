@@ -1825,79 +1825,183 @@ def mux_audio_to_video(
 ) -> bool:
     """
     Menggabungkan (mux/dub) audio Voice Over hasil generate (.MP3 / .WAV) ke dalam video acuan (.MP4).
-    Mendukung pembakaran (burn-in / hardcode) subtitle naskah tepat di safe margin bagian paling bawah tengah (bottom center)
-    menggunakan pipeline GStreamer (textoverlay + subparse + x264enc).
-    Jika subtitle tidak aktif atau gagal, otomatis fallback ke fast stream-copy muxing.
+    Mendukung pembakaran (burn-in / hardcode) subtitle naskah tepat di safe margin bagian paling bawah tengah (bottom center).
+
+    Dukungan Multi-Engine:
+    1. FFmpeg (Engine Utama untuk Production / Streamlit Cloud & Docker):
+       - Burn-in subtitle via filter 'subtitles' dengan styling format ASS/SSA.
+       - Fallback ke fast stream-copy muxing (-c:v copy -c:a aac) jika filter subtitle gagal atau tidak didukung.
+    2. GStreamer (gst-launch-1.0) untuk environment yang memiliki GStreamer native (Local Linux).
     """
     if not video_path or not os.path.exists(video_path):
+        print(f"[mux_audio_to_video] Error: video_path tidak ditemukan: {video_path}")
         return False
     if not audio_path or not os.path.exists(audio_path):
+        print(f"[mux_audio_to_video] Error: audio_path tidak ditemukan: {audio_path}")
         return False
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
-    # 1. Coba bakar subtitle tepat di bagian paling bawah tengah (bottom center) jika diaktifkan dan file SRT tersedia
-    if burn_subtitles and subtitle_path and os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0:
-        try:
-            overlay_props = [
-                "valignment=bottom",
-                "halignment=center",
-                "line-alignment=center",
-                "wrap-mode=word",
-                f"ypad={ypad}",
-                "xpad=30",
-                f"font-desc=Sans Bold {font_size}",
-            ]
-            if subtitle_style == "shaded_box":
-                overlay_props.extend([
-                    "shaded-background=true",
-                    "shading-value=140",
-                    "color=-1",  # Putih
-                ])
-            elif subtitle_style == "yellow_outline":
-                overlay_props.extend([
-                    "draw-outline=true",
-                    "outline-color=-16777216",  # Hitam pekat
-                    "color=-256",  # Kuning terang
-                    "draw-shadow=true",
-                ])
-            else:  # "outline" (Default: YouTube / Netflix Style Outline Putih Bersih)
-                overlay_props.extend([
-                    "draw-outline=true",
-                    "outline-color=-16777216",  # Hitam pekat
-                    "color=-1",  # Putih bersih
-                    "draw-shadow=true",
-                ])
+    has_ffmpeg = bool(shutil.which("ffmpeg"))
+    has_gstreamer = bool(shutil.which("gst-launch-1.0"))
 
-            cmd_sub = [
-                "gst-launch-1.0", "-q",
-                "mp4mux", "name=mux", "faststart=true", "!", "filesink", f"location={output_path}",
-                "filesrc", f"location={subtitle_path}", "!", "subparse", "!", "overlay.text_sink",
-                "filesrc", f"location={video_path}", "!", "qtdemux", "name=demux",
-                "demux.video_0", "!", "h264parse", "!", "avdec_h264", "!",
-                "textoverlay", "name=overlay", *overlay_props, "!",
-                "videoconvert", "!", "x264enc", "speed-preset=veryfast", "bitrate=2500", "tune=zerolatency", "!", "h264parse", "!", "mux.video_0",
-                "filesrc", f"location={audio_path}", "!", "mpegaudioparse", "!", "queue", "!", "mux.audio_0"
+    # ==========================================================
+    # ENGINE 1: FFMPEG (Production / Cloud Standard)
+    # ==========================================================
+    if has_ffmpeg:
+        # A. Coba mux + burn-in subtitle via FFmpeg jika diaktifkan
+        if burn_subtitles and subtitle_path and os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0:
+            temp_srt = None
+            try:
+                # Salin SRT ke file sementara di /tmp agar path bebas karakter aneh atau spasi
+                temp_srt = os.path.join(tempfile.gettempdir(), f"sub_{int(time.time()*1000)}.srt")
+                shutil.copy2(subtitle_path, temp_srt)
+                safe_srt_path = temp_srt.replace("\\", "/").replace(":", "\\:")
+
+                font_name = "Liberation Sans"
+                # ASS Alignment=2 (Bottom-Center), MarginV=ypad
+                if subtitle_style == "shaded_box":
+                    style_str = (
+                        f"FontName={font_name},FontSize={font_size},PrimaryColour=&H00FFFFFF&,"
+                        f"BackColour=&H99000000&,BorderStyle=3,Outline=2,Shadow=0,"
+                        f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
+                    )
+                elif subtitle_style == "yellow_outline":
+                    style_str = (
+                        f"FontName={font_name},FontSize={font_size},PrimaryColour=&H002BEBFF&,"
+                        f"OutlineColour=&H00000000&,BorderStyle=1,Outline=2.5,Shadow=1,"
+                        f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
+                    )
+                else:  # "outline" (Default YouTube / Netflix White Outline)
+                    style_str = (
+                        f"FontName={font_name},FontSize={font_size},PrimaryColour=&H00FFFFFF&,"
+                        f"OutlineColour=&H00000000&,BorderStyle=1,Outline=2.5,Shadow=1,"
+                        f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
+                    )
+
+                cmd_ff_sub = [
+                    "ffmpeg", "-y",
+                    "-i", video_path,
+                    "-i", audio_path,
+                    "-vf", f"subtitles={safe_srt_path}:force_style='{style_str}'",
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "22",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    "-shortest",
+                    output_path,
+                ]
+                res = subprocess.run(cmd_ff_sub, capture_output=True, timeout=120)
+                if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    return True
+                else:
+                    err_msg = res.stderr.decode('utf-8', errors='ignore') if res.stderr else "Unknown error"
+                    print(f"[mux_audio_to_video] FFmpeg subtitle burn gagal, fallback ke fast stream-copy: {err_msg[:200]}")
+            except Exception as e:
+                print(f"[mux_audio_to_video] Exception saat FFmpeg subtitle burn: {e}")
+            finally:
+                if temp_srt and os.path.exists(temp_srt):
+                    try:
+                        os.remove(temp_srt)
+                    except Exception:
+                        pass
+
+        # B. Fallback FFmpeg cepat: stream-copy video (-c:v copy) + AAC audio encode
+        try:
+            cmd_ff_fast = [
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-i", audio_path,
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-shortest",
+                output_path,
             ]
-            res = subprocess.run(cmd_sub, capture_output=True, timeout=90)
+            res = subprocess.run(cmd_ff_fast, capture_output=True, timeout=60)
             if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return True
-        except Exception:
-            pass
+            else:
+                err_msg = res.stderr.decode('utf-8', errors='ignore') if res.stderr else "Unknown error"
+                print(f"[mux_audio_to_video] FFmpeg stream-copy gagal: {err_msg[:200]}")
+        except Exception as e:
+            print(f"[mux_audio_to_video] Exception saat FFmpeg stream-copy: {e}")
 
-    # 2. Fallback cepat: stream-copy muxing (tanpa re-encoding)
-    try:
-        cmd_fast = [
-            "gst-launch-1.0", "-q",
-            "mp4mux", "name=mux", "faststart=true", "!", "filesink", f"location={output_path}",
-            "filesrc", f"location={video_path}", "!", "qtdemux", "name=demux",
-            "demux.video_0", "!", "queue", "!", "h264parse", "!", "mux.video_0",
-            "filesrc", f"location={audio_path}", "!", "mpegaudioparse", "!", "queue", "!", "mux.audio_0"
-        ]
-        res = subprocess.run(cmd_fast, capture_output=True, timeout=60)
-        return res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0
-    except Exception:
-        return False
+    # ==========================================================
+    # ENGINE 2: GSTREAMER (Local Linux / Fallback)
+    # ==========================================================
+    if has_gstreamer:
+        # A. GStreamer with subtitle overlay
+        if burn_subtitles and subtitle_path and os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0:
+            try:
+                overlay_props = [
+                    "valignment=bottom",
+                    "halignment=center",
+                    "line-alignment=center",
+                    "wrap-mode=word",
+                    f"ypad={ypad}",
+                    "xpad=30",
+                    f"font-desc=Sans Bold {font_size}",
+                ]
+                if subtitle_style == "shaded_box":
+                    overlay_props.extend([
+                        "shaded-background=true",
+                        "shading-value=140",
+                        "color=-1",
+                    ])
+                elif subtitle_style == "yellow_outline":
+                    overlay_props.extend([
+                        "draw-outline=true",
+                        "outline-color=-16777216",
+                        "color=-256",
+                        "draw-shadow=true",
+                    ])
+                else:  # outline
+                    overlay_props.extend([
+                        "draw-outline=true",
+                        "outline-color=-16777216",
+                        "color=-1",
+                        "draw-shadow=true",
+                    ])
+
+                cmd_sub = [
+                    "gst-launch-1.0", "-q",
+                    "mp4mux", "name=mux", "faststart=true", "!", "filesink", f"location={output_path}",
+                    "filesrc", f"location={subtitle_path}", "!", "subparse", "!", "overlay.text_sink",
+                    "filesrc", f"location={video_path}", "!", "qtdemux", "name=demux",
+                    "demux.video_0", "!", "h264parse", "!", "avdec_h264", "!",
+                    "textoverlay", "name=overlay", *overlay_props, "!",
+                    "videoconvert", "!", "x264enc", "speed-preset=veryfast", "bitrate=2500", "tune=zerolatency", "!", "h264parse", "!", "mux.video_0",
+                    "filesrc", f"location={audio_path}", "!", "mpegaudioparse", "!", "queue", "!", "mux.audio_0"
+                ]
+                res = subprocess.run(cmd_sub, capture_output=True, timeout=90)
+                if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    return True
+            except Exception as e:
+                print(f"[mux_audio_to_video] GStreamer sub overlay gagal: {e}")
+
+        # B. GStreamer fast stream-copy
+        try:
+            cmd_fast = [
+                "gst-launch-1.0", "-q",
+                "mp4mux", "name=mux", "faststart=true", "!", "filesink", f"location={output_path}",
+                "filesrc", f"location={video_path}", "!", "qtdemux", "name=demux",
+                "demux.video_0", "!", "queue", "!", "h264parse", "!", "mux.video_0",
+                "filesrc", f"location={audio_path}", "!", "mpegaudioparse", "!", "queue", "!", "mux.audio_0"
+            ]
+            res = subprocess.run(cmd_fast, capture_output=True, timeout=60)
+            if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return True
+        except Exception as e:
+            print(f"[mux_audio_to_video] GStreamer stream-copy gagal: {e}")
+
+    print(f"[mux_audio_to_video] Error: Tidak ada engine video (FFmpeg atau GStreamer) yang berhasil.")
+    return False
 
 
 def generate_timeline_voiceover(
