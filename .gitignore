@@ -15,7 +15,5 @@ __pycache__/
 venv/
 env/
 
-reference_videos
-
 # Environment variables
 .env
