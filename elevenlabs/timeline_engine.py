@@ -1614,16 +1614,64 @@ def get_video_duration_seconds(video_path: str) -> float:
     try:
         import mutagen.mp4
         mp4 = mutagen.mp4.MP4(video_path)
-        return float(mp4.info.length)
+        if mp4.info and mp4.info.length:
+            return round(float(mp4.info.length), 3)
+    except Exception:
+        pass
+    try:
+        # Fallback via ffmpeg
+        res = subprocess.run(["ffmpeg", "-i", video_path], capture_output=True, text=True, timeout=10)
+        m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", res.stderr or "")
+        if m:
+            h, mi, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+            return round(h * 3600.0 + mi * 60.0 + s, 3)
     except Exception:
         pass
     try:
         # Fallback via gst-discoverer
         res = subprocess.run(["gst-discoverer-1.0", video_path], capture_output=True, text=True, timeout=10)
-        m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", res.stdout)
+        m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", res.stdout or "")
         if m:
             h, mi, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
-            return h * 3600.0 + mi * 60.0 + s
+            return round(h * 3600.0 + mi * 60.0 + s, 3)
+    except Exception:
+        pass
+    return 0.0
+
+
+def get_audio_duration_seconds(audio_path: str) -> float:
+    """Mengambil total durasi audio (dalam detik) dari file MP3 / WAV."""
+    if not audio_path or not os.path.exists(audio_path):
+        return 0.0
+    try:
+        import mutagen.mp3
+        m = mutagen.mp3.MP3(audio_path)
+        if m.info and m.info.length:
+            return round(float(m.info.length), 3)
+    except Exception:
+        pass
+    try:
+        import mutagen.wave
+        w = mutagen.wave.WAVE(audio_path)
+        if w.info and w.info.length:
+            return round(float(w.info.length), 3)
+    except Exception:
+        pass
+    try:
+        # Fallback via ffmpeg
+        res = subprocess.run(["ffmpeg", "-i", audio_path], capture_output=True, text=True, timeout=10)
+        m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", res.stderr or "")
+        if m:
+            h, mi, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+            return round(h * 3600.0 + mi * 60.0 + s, 3)
+    except Exception:
+        pass
+    try:
+        res = subprocess.run(["gst-discoverer-1.0", audio_path], capture_output=True, text=True, timeout=10)
+        m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", res.stdout or "")
+        if m:
+            h, mi, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+            return round(h * 3600.0 + mi * 60.0 + s, 3)
     except Exception:
         pass
     return 0.0
@@ -1963,6 +2011,22 @@ def mux_audio_to_video(
     # ENGINE 1: FFMPEG (Production / Cloud Standard)
     # ==========================================================
     if has_ffmpeg:
+        v_dur = get_video_duration_seconds(video_path)
+        a_dur = get_audio_duration_seconds(audio_path)
+        target_dur = a_dur if a_dur > 0 else v_dur
+
+        # Jika audio lebih panjang dari video, tahan (freeze/clone) frame terakhir video
+        # agar seluruh kalimat narasi Voice Over selesai diucapkan tanpa ada yang terpotong.
+        v_pad_sec = 0.0
+        if v_dur > 0 and a_dur > v_dur + 0.05:
+            v_pad_sec = round(a_dur - v_dur + 0.05, 2)
+
+        # Jika video lebih panjang dari audio, pad audio dengan jeda hening agar video tidak terpotong
+        a_pad_sec = 0.0
+        if a_dur > 0 and v_dur > a_dur + 0.05:
+            a_pad_sec = round(v_dur - a_dur + 0.05, 2)
+            target_dur = v_dur
+
         # A. Coba mux + burn-in subtitle via FFmpeg jika diaktifkan
         if burn_subtitles and subtitle_path and os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0:
             temp_srt = None
@@ -1993,11 +2057,22 @@ def mux_audio_to_video(
                         f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
                     )
 
+                vf_chain = []
+                if v_pad_sec > 0:
+                    vf_chain.append(f"tpad=stop_mode=clone:stop_duration={v_pad_sec}")
+                vf_chain.append(f"subtitles={safe_srt_path}:force_style='{style_str}'")
+                vf_full = ",".join(vf_chain)
+
                 cmd_ff_sub = [
                     "ffmpeg", "-y",
                     "-i", video_path,
                     "-i", audio_path,
-                    "-vf", f"subtitles={safe_srt_path}:force_style='{style_str}'",
+                    "-vf", vf_full,
+                ]
+                if a_pad_sec > 0:
+                    cmd_ff_sub.extend(["-af", f"apad=pad_dur={a_pad_sec}"])
+
+                cmd_ff_sub.extend([
                     "-c:v", "libx264",
                     "-preset", "veryfast",
                     "-crf", "22",
@@ -2005,9 +2080,12 @@ def mux_audio_to_video(
                     "-b:a", "192k",
                     "-map", "0:v:0",
                     "-map", "1:a:0",
-                    "-shortest",
-                    output_path,
-                ]
+                ])
+                if target_dur > 0:
+                    cmd_ff_sub.extend(["-t", f"{target_dur:.2f}"])
+
+                cmd_ff_sub.append(output_path)
+
                 res = subprocess.run(cmd_ff_sub, capture_output=True, timeout=120)
                 if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     return True
@@ -2023,20 +2101,37 @@ def mux_audio_to_video(
                     except Exception:
                         pass
 
-        # B. Fallback FFmpeg cepat: stream-copy video (-c:v copy) + AAC audio encode
+        # B. Fallback FFmpeg: sinkronisasi durasi presisi tanpa pembakaran subtitle
         try:
             cmd_ff_fast = [
                 "ffmpeg", "-y",
                 "-i", video_path,
                 "-i", audio_path,
-                "-c:v", "copy",
+            ]
+            if v_pad_sec > 0:
+                cmd_ff_fast.extend([
+                    "-vf", f"tpad=stop_mode=clone:stop_duration={v_pad_sec}",
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "22",
+                ])
+            else:
+                cmd_ff_fast.extend(["-c:v", "copy"])
+
+            if a_pad_sec > 0:
+                cmd_ff_fast.extend(["-af", f"apad=pad_dur={a_pad_sec}"])
+
+            cmd_ff_fast.extend([
                 "-c:a", "aac",
                 "-b:a", "192k",
                 "-map", "0:v:0",
                 "-map", "1:a:0",
-                "-shortest",
-                output_path,
-            ]
+            ])
+            if target_dur > 0:
+                cmd_ff_fast.extend(["-t", f"{target_dur:.2f}"])
+
+            cmd_ff_fast.append(output_path)
+
             res = subprocess.run(cmd_ff_fast, capture_output=True, timeout=60)
             if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return True
@@ -2284,6 +2379,12 @@ def generate_timeline_voiceover(
         if actual_finish > timeline_end_sec:
             timeline_end_sec = actual_finish
 
+    # Harmonisasi durasi timeline audio dengan video acuan (jika video lebih panjang dari naskah)
+    if video_path and os.path.exists(video_path):
+        ref_v_dur = get_video_duration_seconds(video_path)
+        if ref_v_dur > timeline_end_sec:
+            timeline_end_sec = ref_v_dur
+
     total_master_samples = int(np.ceil(timeline_end_sec * SAMPLE_RATE)) + int(0.25 * SAMPLE_RATE)
     master_buffer = np.zeros(total_master_samples, dtype=np.float32)
 
@@ -2318,6 +2419,14 @@ def generate_timeline_voiceover(
     if cursor_sample > len(master_buffer):
         extra = np.zeros(cursor_sample - len(master_buffer) + 4800, dtype=np.float32)
         master_buffer = np.concatenate([master_buffer, extra])
+
+    # Harmonisasi jika video acuan lebih panjang dari seluruh sampel audio
+    if video_path and os.path.exists(video_path):
+        ref_v_dur = get_video_duration_seconds(video_path)
+        v_needed_samples = int(np.ceil(ref_v_dur * SAMPLE_RATE))
+        if v_needed_samples > len(master_buffer):
+            extra_v = np.zeros(v_needed_samples - len(master_buffer), dtype=np.float32)
+            master_buffer = np.concatenate([master_buffer, extra_v])
 
     # 2. Render audio ke master buffer dan susun cue subtitle SRT dengan sinkronisasi presisi
     srt_Blocks = []
