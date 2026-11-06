@@ -2,8 +2,8 @@
 """
 ElevenLabs AI Voice Studio - Streamlit Web Application
 Mendukung:
-1. Studio Naskah Berdurasi / Timeline Storyboard (Format Tabel PDF: Estimasi Waktu | Arahan Visual | Naskah Voice Over)
-   dengan penempatan waktu presisi & penyesuaian kecepatan otomatis (WSOLA Pitch-Preserving Time-Stretch)
+1. Studio Naskah Berdurasi / Timeline Storyboard (Format Durasi Wajib HH:MM:SS - HH:MM:SS)
+   Menerima upload multi-format: PDF, Word (.docx/.doc), ODT, RTF, Excel (.xlsx), CSV, TSV, SRT, VTT, TXT, MD, JSON
 2. Text-to-Speech Bebas (Single Block)
 3. Studio Dialog Multi-Speaker (Podcast)
 4. Katalog Suara Workspace & Riwayat Audio Lokal
@@ -11,7 +11,10 @@ Mendukung:
 
 import os
 import io
+import re
+import html
 import json
+from datetime import datetime
 import streamlit as st
 
 from elevenlabs_client import (
@@ -23,12 +26,25 @@ from elevenlabs_client import (
 )
 from timeline_engine import (
     CETAKIA_DEFAULT_SEGMENTS,
+    PAYMENT_METHOD_SEGMENTS,
+    PAYMENT_METHOD_VIDEO_SYNCED_SEGMENTS,
+    REFERENCE_PAYMENT_METHOD_VIDEO_PATH,
     QUICK_DEMO_SEGMENTS,
+    SUPPORTED_SCRIPT_EXTENSIONS,
+    parse_timecode_to_seconds,
     parse_time_range_str,
     format_seconds_to_hms,
-    parse_pdf_storyboard,
+    normalize_to_hms_range,
+    is_valid_hms_range,
+    parse_any_storyboard_file,
     parse_raw_timeline_text,
     generate_timeline_voiceover,
+    get_timecode_dropdown_options,
+    extract_video_thumbnail,
+    get_video_duration_seconds,
+    mux_audio_to_video,
+    resequence_timeline_timestamps,
+    generate_subtitle_preview_image,
 )
 
 # ==========================================================
@@ -68,28 +84,6 @@ def fetch_available_models(api_key: str):
     return client.get_models(tts_only=True)
 
 
-def extract_text_from_uploaded_doc(uploaded_file) -> str:
-    """Membaca teks biasa dari file .txt, .md, atau .pdf."""
-    file_bytes = uploaded_file.getvalue()
-    ext = os.path.splitext(uploaded_file.name)[1].lower()
-
-    if ext == ".pdf":
-        try:
-            import pypdf
-            reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-            pages = [p.extract_text() or "" for p in reader.pages]
-            return "\n\n".join(p.strip() for p in pages if p.strip())
-        except Exception as e:
-            return f"[Gagal mengekstrak PDF: {e}]"
-
-    for enc in ("utf-8", "latin-1", "cp1252"):
-        try:
-            return file_bytes.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return ""
-
-
 def format_voice_label(v: dict) -> str:
     """Membuat label tampilan yang informatif untuk setiap suara di dropdown."""
     name = v.get("name", "Unknown")
@@ -111,18 +105,30 @@ def format_voice_label(v: dict) -> str:
     return f"{badge} {name}{lang_info} [{short_id}]"
 
 
+def set_storyboard_segments(new_segments: list):
+    """
+    Memperbarui isi Tabel Storyboard sekaligus menaikkan `board_version`
+    agar seluruh widget input di tabel Streamlit langsung ter-refresh dengan data baru.
+    """
+    normalized = []
+    for seg in new_segments:
+        normalized.append({
+            "time_range": normalize_to_hms_range(seg.get("time_range", "00:00:00 - 00:00:05")),
+            "visual": (seg.get("visual") or "").strip(),
+            "text": (seg.get("text") or "").strip(),
+        })
+    st.session_state.timeline_segments = normalized
+    st.session_state.board_version = st.session_state.get("board_version", 0) + 1
+
+
 # ==========================================================
 # Sidebar: Pengaturan Suara, Model, dan Parameter
 # ==========================================================
 with st.sidebar:
     st.header("🎚️ Pengaturan Studio")
 
-    api_key = st.text_input(
-        "ElevenLabs API Key",
-        value=os.getenv("ELEVENLABS_API_KEY", DEFAULT_API_KEY),
-        type="password",
-        help="API Key dari akun ElevenLabs Anda.",
-    )
+    # API Key dibaca secara privat dari Environment Variable atau konfigurasi backend (tidak diekspos ke UI)
+    api_key = os.getenv("ELEVENLABS_API_KEY", DEFAULT_API_KEY)
 
     if st.button("🔄 Refresh Suara Workspace", use_container_width=True):
         fetch_workspace_voices.clear()
@@ -192,7 +198,10 @@ with st.sidebar:
     st.subheader("🧠 Model AI ElevenLabs")
 
     model_ids = [m["model_id"] for m in models_list] if models_list else list(MODEL_DESCRIPTIONS.keys())
-    default_model_idx = model_ids.index("eleven_multilingual_v2") if "eleven_multilingual_v2" in model_ids else 0
+    default_model_idx = (
+        model_ids.index("eleven_v4") if "eleven_v4" in model_ids
+        else (model_ids.index("eleven_multilingual_v2") if "eleven_multilingual_v2" in model_ids else 0)
+    )
 
     selected_model_id = st.selectbox(
         "Pilih Model TTS",
@@ -250,7 +259,7 @@ with st.sidebar:
 st.title("🎙️ ElevenLabs AI Voice Studio")
 st.caption(
     f"Workspace Aktif | Suara Terpilih: **{selected_voice.get('name')}** (`{selected_voice_id}`) | "
-    f"Model: `{selected_model_id}`"
+    f"Model: `{selected_model_id}` | Format Durasi Wajib: **`HH:MM:SS - HH:MM:SS`**"
 )
 
 client = ElevenLabsStudioClient(api_key=api_key)
@@ -259,7 +268,7 @@ client = ElevenLabsStudioClient(api_key=api_key)
 # Navigasi Tab Fitur Studio
 # ==========================================================
 tab_timeline, tab_single_tts, tab_dialog, tab_voices, tab_history = st.tabs([
-    "⏱️ Studio Naskah Berdurasi (Timeline PDF)",
+    "⏱️ Studio Naskah Berdurasi (Timeline Storyboard)",
     "📝 Text-to-Speech Bebas",
     "🎭 Studio Dialog / Multi-Speaker",
     "🗂️ Katalog Suara Workspace",
@@ -270,148 +279,494 @@ tab_timeline, tab_single_tts, tab_dialog, tab_voices, tab_history = st.tabs([
 # TAB 1: STUDIO NASKAH BERDURASI (TIMELINE STORYBOARD)
 # ==========================================================
 with tab_timeline:
-    st.subheader("⏱️ Naskah Voice Over Berbasis Rentang Waktu (Timeline Storyboard)")
+    st.subheader("⏱️ Naskah Voice Over Berbasis Rentang Waktu (Format `HH:MM:SS - HH:MM:SS`)")
     st.markdown(
-        "Susun atau impor naskah dengan format tabel seperti **PDF Naskah Voice Over** "
-        "(**Estimasi Waktu** | **Arahan Visual** | **Naskah Voice Over**). "
-        "Sistem hanya akan membacakan kolom **Naskah Voice Over** dan menempatkan suaranya tepat pada "
-        "rentang detik yang Anda atur (misal: `00:00:00 - 00:00:05`, `00:00:06 - 00:00:10`, dst.)."
+        "Susun atau unggah file naskah Anda (**PDF, Word `.docx`/`.doc`, Google Docs, `.odt`, `.rtf`, Excel `.xlsx`, `.csv`, `.srt`, `.txt`, `.md`**). "
+        "Seluruh rentang durasi menggunakan format **`HH:MM:SS - HH:MM:SS` (`Jam:Menit:Detik`)**, misalnya `00:00:00 - 00:00:05` "
+        "*(apabila dokumen yang diunggah memiliki format `00:00 - 00:05`, sistem otomatis mengonversinya menjadi `00:00:00 - 00:00:05` ke dalam Tabel Storyboard)*."
     )
 
-    # Inisialisasi state segmen timeline dengan preset PDF Cetakia
+    if "board_version" not in st.session_state:
+        st.session_state.board_version = 1
+
     if "timeline_segments" not in st.session_state:
         st.session_state.timeline_segments = [dict(row) for row in CETAKIA_DEFAULT_SEGMENTS]
 
-    # Baris Kontrol Preset & Impor File PDF/TXT
-    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1.6, 1.8, 1.2])
+    if "active_video_path" not in st.session_state:
+        st.session_state.active_video_path = None
+    if "active_video_name" not in st.session_state:
+        st.session_state.active_video_name = None
+    if "active_video_duration" not in st.session_state:
+        st.session_state.active_video_duration = 0.0
+    if "video_seek_time" not in st.session_state:
+        st.session_state.video_seek_time = 0
+    if "feature_name" not in st.session_state:
+        st.session_state.feature_name = "Payment_Method"
+
+    # Baris Kontrol Preset & Impor File Multi-Format
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1.6, 1.9, 1.3])
 
     with ctrl_col1:
-        st.markdown("**1. Muat Preset Naskah:**")
-        p_btn1, p_btn2, p_btn3 = st.columns(3)
+        st.markdown("**1. Preset & Format Tabel:**")
+        p_btn1, p_btn2 = st.columns(2)
         with p_btn1:
-            if st.button("📄 Naskah PDF Cetakia", use_container_width=True, help="Muat 6 segmen lengkap dari PDF Tutorial Flow Cetakia"):
-                st.session_state.timeline_segments = [dict(row) for row in CETAKIA_DEFAULT_SEGMENTS]
+            if st.button("💳 Naskah Payment (Dokumen)", use_container_width=True, help="Muat 6 segmen dari naskah dokumen Payment Method"):
+                set_storyboard_segments(PAYMENT_METHOD_SEGMENTS)
+                st.session_state.feature_name = "Payment_Method"
                 st.rerun()
         with p_btn2:
-            if st.button("⚡ Contoh 3 Segmen", use_container_width=True, help="Muat contoh singkat 3 segmen"):
-                st.session_state.timeline_segments = [dict(row) for row in QUICK_DEMO_SEGMENTS]
+            if st.button("📹 Naskah Synced Video (41s)", use_container_width=True, help="Muat 6 segmen yang disesuaikan presisi dengan video acuan (41 detik) dan langsung aktifkan video"):
+                set_storyboard_segments(PAYMENT_METHOD_VIDEO_SYNCED_SEGMENTS)
+                st.session_state.feature_name = "Payment_Method"
+                if os.path.exists(REFERENCE_PAYMENT_METHOD_VIDEO_PATH):
+                    st.session_state.active_video_path = REFERENCE_PAYMENT_METHOD_VIDEO_PATH
+                    st.session_state.active_video_name = "Payment_Method_Tutorial.mp4"
+                    st.session_state.active_video_duration = get_video_duration_seconds(REFERENCE_PAYMENT_METHOD_VIDEO_PATH)
+                    st.session_state.video_seek_time = 0
                 st.rerun()
+
+        p_btn3, p_btn4 = st.columns(2)
         with p_btn3:
+            if st.button("📄 Naskah Component", use_container_width=True, help="Muat 6 segmen dari PDF Tutorial Flow Cetakia"):
+                set_storyboard_segments(CETAKIA_DEFAULT_SEGMENTS)
+                st.session_state.feature_name = "Component"
+                st.rerun()
+        with p_btn4:
+            if st.button("🕒 Rapikan Waktu Berurutan", use_container_width=True, help="Tata ulang seluruh rentang waktu agar berurutan mulai 00:00:00 (berguna setelah memindah posisi baris)"):
+                reseq = resequence_timeline_timestamps(st.session_state.timeline_segments)
+                set_storyboard_segments(reseq)
+                st.toast("✓ Seluruh rentang waktu telah dirapikan berurutan!", icon="🕒")
+                st.rerun()
+
+        p_btn5, p_btn6 = st.columns(2)
+        with p_btn5:
+            if st.button("🕒 Standarkan HH:MM:SS", use_container_width=True, help="Ubah semua baris durasi ke format wajib HH:MM:SS - HH:MM:SS"):
+                set_storyboard_segments(st.session_state.timeline_segments)
+                st.toast("✓ Seluruh rentang waktu telah distandarkan ke format HH:MM:SS - HH:MM:SS!", icon="🕒")
+                st.rerun()
+        with p_btn6:
             if st.button("🧹 Reset (1 Baris)", use_container_width=True):
-                st.session_state.timeline_segments = [
+                set_storyboard_segments([
                     {
                         "time_range": "00:00:00 - 00:00:05",
                         "visual": "Adegan pembuka muncul.",
                         "text": "Selamat datang di panduan penggunaan Cetakia.",
                     }
-                ]
+                ])
                 st.rerun()
 
     with ctrl_col2:
         uploaded_storyboard = st.file_uploader(
-            "📎 2. Impor Otomatis dari File PDF Tabel / TXT (.pdf, .txt, .md)",
-            type=["pdf", "txt", "md"],
-            key="timeline_pdf_uploader",
-            help="Unggah file PDF Naskah Voice Over (3 kolom: Estimasi Waktu, Arahan Visual, Naskah Voice Over). Kolom judul dan arahan visual otomatis dipisahkan agar tidak ikut terbaca sebagai suara!",
+            "📎 2. Upload File Naskah (.pdf, .docx, .doc, .odt, .rtf, .xlsx, .csv, .srt, .txt, .md)",
+            type=SUPPORTED_SCRIPT_EXTENSIONS,
+            key="timeline_multi_uploader",
+            help=(
+                "Mendukung file PDF Tabel 3 Kolom (Estimasi Waktu | Arahan Visual (Adegan Video) | Naskah Voice Over (Audio)), "
+                "Microsoft Word (.docx/.doc), Google Docs, LibreOffice (.odt), Excel (.xlsx), CSV/TSV, Subtitle (.srt/.vtt), "
+                "maupun teks (.txt/.md). Otomatis dipetakan ke 3 kolom Tabel Storyboard di bawah."
+            ),
         )
         if uploaded_storyboard is not None:
-            file_id = f"{uploaded_storyboard.name}_{uploaded_storyboard.size}"
-            if st.session_state.get("last_uploaded_storyboard_id") != file_id:
-                raw_bytes = uploaded_storyboard.getvalue()
-                ext = os.path.splitext(uploaded_storyboard.name)[1].lower()
-                if ext == ".pdf":
-                    parsed_rows = parse_pdf_storyboard(raw_bytes)
-                else:
-                    txt_str = raw_bytes.decode("utf-8", errors="replace")
-                    parsed_rows = parse_raw_timeline_text(txt_str)
+            file_sig = f"{uploaded_storyboard.name}_{uploaded_storyboard.size}"
+            auto_apply = st.session_state.get("last_uploaded_storyboard_sig") != file_sig
+            reapply_clicked = st.button(
+                f"📥 Terapkan File '{uploaded_storyboard.name}' ke Tabel Storyboard",
+                use_container_width=True,
+            )
 
+            if auto_apply or reapply_clicked:
+                raw_bytes = uploaded_storyboard.getvalue()
+                parsed_rows = parse_any_storyboard_file(uploaded_storyboard.name, raw_bytes)
                 if parsed_rows:
-                    st.session_state.timeline_segments = parsed_rows
-                    st.session_state["last_uploaded_storyboard_id"] = file_id
-                    st.success(f"✓ Berhasil mengekstrak **{len(parsed_rows)} segmen waktu** dari `{uploaded_storyboard.name}`!")
+                    set_storyboard_segments(parsed_rows)
+                    st.session_state["last_uploaded_storyboard_sig"] = file_sig
+                    safe_fn = re.sub(r"[^\w\-]+", "_", os.path.splitext(uploaded_storyboard.name)[0]).strip("_")
+                    if safe_fn:
+                        st.session_state.feature_name = safe_fn
+                    st.session_state["upload_success_msg"] = (
+                        f"✓ Berhasil menerapkan **{len(parsed_rows)} baris segmen** dari `{uploaded_storyboard.name}` "
+                        f"sesuai template Tabel Storyboard (**Estimasi Waktu `HH:MM:SS` | Arahan Visual | Naskah Voice Over**)!"
+                    )
                     st.rerun()
                 else:
-                    st.warning("Tidak ditemukan pola rentang waktu (MM:SS - MM:SS) pada file yang diunggah.")
+                    st.error(
+                        f"Gagal mengekstrak teks naskah dari `{uploaded_storyboard.name}`. "
+                        "Pastikan file tidak kosong atau terproteksi password."
+                    )
+
+        if st.session_state.get("upload_success_msg"):
+            st.success(st.session_state["upload_success_msg"])
 
     with ctrl_col3:
         fit_mode_choice = st.selectbox(
             "⚙️ 3. Mode Penyesuaian Durasi:",
-            options=["auto_fit", "natural_pad", "strict_trim"],
+            options=["natural_pad", "auto_fit", "strict_trim"],
             index=0,
             format_func=lambda m: {
-                "auto_fit": "🎯 Auto-Fit Durasi (Sesuaikan Kecepatan & Jeda Hening)",
-                "natural_pad": "🌊 Kecepatan Alami + Jeda Hening (Geser Jika Lebih Panjang)",
-                "strict_trim": "✂️ Potong Presisi pada Batas Waktu Akhir (Trim)",
+                "natural_pad": "🌊 Kecepatan Alami + Jeda Hening (Rekomendasi)",
+                "auto_fit": "🎯 Auto-Fit Durasi (Sesuaikan Kecepatan & Jeda)",
+                "strict_trim": "✂️ Potong Presisi Batas Waktu",
             }[m],
-            help=(
-                "• Auto-Fit: Menempatkan tiap teks tepat pada detik mulainya. Jika durasi suara lebih panjang dari rentang yang diatur, "
-                "kecepatan bicara otomatis dipercepat tanpa mengubah nada suara (WSOLA). Jika lebih pendek, ditambahkan jeda hening hingga segmen berikutnya.\n"
-                "• Kecepatan Alami: Menggunakan kecepatan bicara 100% alami dan menggeser segmen berikutnya jika teks terlalu panjang."
-            ),
         )
         stretch_shorter_flag = st.checkbox(
-            "Perlambat juga jika suara lebih pendek dari durasi",
+            "Perlambat jika suara lebih pendek",
             value=False,
-            help="Jika dicentang, kalimat pendek akan diperlambat agar memenuhi seluruh rentang waktu. Secara default tidak dicentang agar kalimat pendek tetap bicara normal lalu diikuti jeda hening.",
         )
+        burn_subtitles_flag = st.checkbox(
+            "📝 Sertakan Subtitle Video (Bottom Center)",
+            value=True,
+            help="Teks naskah dari tabel storyboard otomatis dibakar/ditampilkan di safe margin bagian bawah tengah video (center) sebagai komponen pendukung yang tidak menutupi visual penting video.",
+        )
+        if burn_subtitles_flag:
+            with st.popover("🎨 Pengaturan & Pratinjau Subtitle Video", use_container_width=True):
+                st.caption(
+                    "💡 **Komponen Pendukung**: Subtitle otomatis dipecah menjadi 1 baris kalimat ringkas "
+                    "dan ditempatkan tepat di margin bawah agar tidak menutupi form modal atau tombol video."
+                )
+                sub_style_choice = st.selectbox(
+                    "Gaya Visual Subtitle:",
+                    options=["outline", "shaded_box", "yellow_outline"],
+                    index=0,
+                    format_func=lambda s: {
+                        "outline": "✨ Outline Hitam Elegan (YouTube/Netflix - Disarankan)",
+                        "shaded_box": "⬛ Kotak Gelap Transparan (Shaded Box)",
+                        "yellow_outline": "🟡 Teks Kuning Kontras Ringkas (Yellow Outline)",
+                    }[s],
+                )
+                col_sub_sz, col_sub_pad = st.columns(2)
+                with col_sub_sz:
+                    sub_font_size = st.slider(
+                        "Ukuran Huruf (pt):",
+                        min_value=10,
+                        max_value=24,
+                        value=13,
+                        step=1,
+                        help="Ukuran 13pt ringkas & proporsional, tidak menutupi konten video.",
+                    )
+                with col_sub_pad:
+                    sub_ypad = st.slider(
+                        "Jarak Bawah / ypad (px):",
+                        min_value=6,
+                        max_value=35,
+                        value=12,
+                        step=2,
+                        help="Jarak dari tepi bawah video. Nilai 12px menempatkan subtitle di safe margin paling bawah.",
+                    )
 
-    # Opsi Input Teks Cepat (Format "Teks: ... / Durasi: 00:00:00 - 00:00:05")
-    with st.expander("📋 Input Cepat via Teks Format 'Teks & Durasi' (Klik untuk membuka)", expanded=False):
-        st.caption(
-            "Anda juga bisa menempelkan naskah dengan format `Teks:` dan `Durasi:` atau `00:00:00 - 00:00:05 | Visual | Teks` di bawah ini:"
-        )
-        quick_paste_default = (
-            "Teks: Selamat datang di panduan penggunaan Cetakia.\n"
-            "Durasi: 00:00:00 - 00:00:05\n\n"
-            "Teks: Pertama, dari halaman utama Dashboard, arahkan kursor Anda ke menu di sebelah kiri.\n"
-            "Durasi: 00:00:06 - 00:00:10"
-        )
-        quick_paste_txt = st.text_area("Tempel format Teks & Durasi:", value=quick_paste_default, height=130)
-        if st.button("📥 Terapkan Teks ke Tabel Storyboard"):
-            parsed_q = parse_raw_timeline_text(quick_paste_txt)
-            if parsed_q:
-                st.session_state.timeline_segments = parsed_q
-                st.success(f"Berhasil menerapkan {len(parsed_q)} segmen ke tabel!")
-                st.rerun()
+                # Pratinjau Gambar Subtitle langsung di dalam popover
+                non_empty_segs = [s for s in st.session_state.timeline_segments if (s.get("text") or "").strip()]
+                seg_choices = [
+                    f"Segmen #{i+1} ({s.get('time_range', '')}): {s.get('text', '')[:35]}..."
+                    for i, s in enumerate(non_empty_segs)
+                ] if non_empty_segs else ["Contoh Teks: Selamat datang di panduan Cetakia."]
+                sel_prev_label = st.selectbox(
+                    "Contoh Adegan & Teks untuk Pratinjau:",
+                    options=seg_choices,
+                    index=0,
+                    key="sel_sub_preview_seg",
+                )
+                s_idx = seg_choices.index(sel_prev_label) if sel_prev_label in seg_choices else 0
+                sample_seg = non_empty_segs[s_idx] if non_empty_segs else None
+                sample_text = sample_seg["text"] if sample_seg else "Selamat datang di panduan Cetakia."
+                sample_tc = sample_seg.get("time_range", "00:00:10").split("-")[0].strip() if sample_seg else "00:00:10"
+
+                prev_img_p = generate_subtitle_preview_image(
+                    video_path=st.session_state.get("active_video_path"),
+                    text=sample_text,
+                    timestamp_hms=sample_tc,
+                    subtitle_style=sub_style_choice,
+                    font_size=sub_font_size,
+                    ypad=sub_ypad,
+                )
+                if prev_img_p and os.path.exists(prev_img_p):
+                    st.markdown("---")
+                    st.markdown("**🖼️ Pratinjau Subtitle pada Frame Video:**")
+                    st.image(
+                        prev_img_p,
+                        caption=f"Gaya: {sub_style_choice} | Ukuran: {sub_font_size}pt | Margin Bawah: {sub_ypad}px",
+                        use_container_width=True,
+                    )
+        else:
+            sub_style_choice = "outline"
+            sub_font_size = 13
+            sub_ypad = 12
+            prev_img_p = None
+
+    # Expander Pratinjau Visual Subtitle pada Video jika diaktifkan
+    if burn_subtitles_flag and 'prev_img_p' in locals() and prev_img_p and os.path.exists(prev_img_p):
+        with st.expander("🖼️ Pratinjau Gambar Subtitle pada Video Acuan (Klik untuk Melihat Gambar Penuh)", expanded=False):
+            pv_col1, pv_col2 = st.columns([1.2, 2.8])
+            with pv_col1:
+                st.markdown("##### ⚙️ Detail Subtitle Terpilih:")
+                st.markdown(f"- **Gaya Subtitle:** `{sub_style_choice}`")
+                st.markdown(f"- **Ukuran Font:** `{sub_font_size} pt`")
+                st.markdown(f"- **Jarak dari Bawah (ypad):** `{sub_ypad} px`")
+                st.caption(
+                    "Gambar di samping menunjukkan letak dan ukuran subtitle secara akurat pada video Anda. "
+                    "Pastikan teks subtitle tidak menutupi tombol atau form penting sebelum menekan tombol Generate."
+                )
+            with pv_col2:
+                st.image(
+                    prev_img_p,
+                    caption=f"Pratinjau Subtitle pada Frame Video: {sub_style_choice} ({sub_font_size}pt, ypad {sub_ypad}px)",
+                    use_container_width=True,
+                )
+
+    # ==========================================================
+    # 🎬 Fitur Unggah & Sinkronisasi Video Acuan (.MP4)
+    # ==========================================================
+    with st.expander("🎬 Referensi & Sinkronisasi Video Acuan MP4 (Klik untuk Buka/Tutup)", expanded=bool(st.session_state.get("active_video_path"))):
+        v_col1, v_col2 = st.columns([1.5, 1.5])
+        with v_col1:
+            st.markdown("##### 📹 Unggah Video Acuan untuk Adegan Visual:")
+            uploaded_video = st.file_uploader(
+                "Pilih File Video (.mp4, .mov, .mkv, .webm)",
+                type=["mp4", "mov", "mkv", "webm"],
+                key="storyboard_video_uploader",
+                help="Video ini akan ditampilkan cuplikannya pada kolom 'Arahan Visual (Adegan Video)' per segmen dan dapat digabungkan langsung dengan audio Voice Over (Dubbing).",
+            )
+            v_btn1, v_btn2 = st.columns(2)
+            with v_btn1:
+                if st.button("🎬 Gunakan Video Referensi Payment Method (41s)", use_container_width=True):
+                    if os.path.exists(REFERENCE_PAYMENT_METHOD_VIDEO_PATH):
+                        st.session_state.active_video_path = REFERENCE_PAYMENT_METHOD_VIDEO_PATH
+                        st.session_state.active_video_name = "Payment_Method_Tutorial.mp4"
+                        st.session_state.active_video_duration = get_video_duration_seconds(REFERENCE_PAYMENT_METHOD_VIDEO_PATH)
+                        st.session_state.video_seek_time = 0
+                        st.session_state.feature_name = "Payment_Method"
+                        st.rerun()
+            with v_btn2:
+                if st.session_state.get("active_video_path"):
+                    if st.button("❌ Lepas Video Acuan", use_container_width=True):
+                        st.session_state.active_video_path = None
+                        st.session_state.active_video_name = None
+                        st.session_state.active_video_duration = 0.0
+                        st.session_state.video_seek_time = 0
+                        st.rerun()
+
+            if uploaded_video is not None:
+                vid_save_dir = os.path.join(client.output_dir, "uploaded_videos")
+                os.makedirs(vid_save_dir, exist_ok=True)
+                target_vpath = os.path.join(vid_save_dir, uploaded_video.name)
+                # Tulis file secara streaming hemat memori
+                with open(target_vpath, "wb") as f:
+                    f.write(uploaded_video.getbuffer())
+
+                if st.session_state.get("active_video_path") != target_vpath:
+                    st.session_state.active_video_path = target_vpath
+                    st.session_state.active_video_name = uploaded_video.name
+                    st.session_state.active_video_duration = get_video_duration_seconds(target_vpath)
+                    st.session_state.video_seek_time = 0
+                    safe_vn = re.sub(r"[^\w\-]+", "_", os.path.splitext(uploaded_video.name)[0]).strip("_")
+                    if safe_vn and not safe_vn.lower().startswith("whatsapp"):
+                        st.session_state.feature_name = safe_vn
+                    st.rerun()
+
+            if st.session_state.get("active_video_path"):
+                v_dur = st.session_state.get("active_video_duration", 0.0)
+                v_hms = format_seconds_to_hms(v_dur, True)
+                st.info(
+                    f"🎥 **Video Aktif:** `{st.session_state.active_video_name}`  \n"
+                    f"⏱️ **Total Durasi:** `{v_hms}` ({v_dur:.1f} detik)  \n"
+                    f"✓ Cuplikan adegan otomatis muncul pada setiap baris Tabel Storyboard di bawah."
+                )
+
+        with v_col2:
+            act_vpath = st.session_state.get("active_video_path")
+            tl_res_state = st.session_state.get("last_timeline_result")
+            dubbed_vpath_state = tl_res_state.get("dubbed_video_path") if tl_res_state else None
+            has_dubbed_ready = bool(dubbed_vpath_state and os.path.exists(dubbed_vpath_state))
+
+            if act_vpath and os.path.exists(act_vpath):
+                cur_seek = int(st.session_state.get("video_seek_time", 0))
+                video_source_to_play = act_vpath
+                video_title_label = st.session_state.active_video_name
+
+                if has_dubbed_ready:
+                    # Switcher tampilan video pada satu-satunya pemutar video utama (1 hardware decoder, 0% crash)
+                    view_mode = st.radio(
+                        "🎬 Mode Tampilan Pemutar Video:",
+                        options=["🎬 Video Final Dubbing (Suara AI)", "📹 Video Acuan Asli"],
+                        index=0,
+                        horizontal=True,
+                        key="main_video_player_mode",
+                        help="Pilih video mana yang ingin diputar pada pemutar utama.",
+                    )
+                    if "Video Final" in view_mode:
+                        video_source_to_play = dubbed_vpath_state
+                        video_title_label = f"{st.session_state.active_video_name} (Dubbed Voice Over AI)"
+                    else:
+                        video_source_to_play = act_vpath
+                        video_title_label = f"{st.session_state.active_video_name} (Acuan Asli)"
+
+                seek_badge = f" *(Mulai detik ke-{cur_seek}s / {format_seconds_to_hms(cur_seek, True)})*" if cur_seek > 0 else ""
+                st.caption(f"📺 Pemutar Video Utama: `{video_title_label}`{seek_badge}")
+                # Stream file MP4 langsung via HTTP range requests (sangat hemat memori RAM)
+                st.video(video_source_to_play, start_time=cur_seek)
+                if cur_seek > 0:
+                    if st.button("⏮️ Putar Ulang dari Awal (00:00:00)", key="btn_reset_seek", use_container_width=True):
+                        st.session_state.video_seek_time = 0
+                        st.rerun()
             else:
-                st.error("Format tidak dikenali. Pastikan menyertakan rentang waktu seperti `00:00:00 - 00:00:05`.")
+                st.caption("📺 Pratinjau Video (Belum ada video yang dimuat)")
+                st.markdown(
+                    "<div style='background-color:#1e293b; padding:45px 20px; border-radius:8px; text-align:center; color:#94a3b8; border:1px dashed #3a4454;'>"
+                    "Unggah file video MP4 atau klik tombol preset video referensi di sebelah kiri."
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # Pratinjau Tabel Storyboard Sesuai Template 3 Kolom + Input Teks Cepat
+    exp_col1, exp_col2 = st.columns(2)
+    with exp_col1:
+        with st.expander("📊 Lihat Tabel Storyboard (Format Template Dokumen)", expanded=False):
+            rows_html = []
+            for seg in st.session_state.timeline_segments:
+                tr_esc = html.escape(normalize_to_hms_range(seg.get("time_range", "00:00:00 - 00:00:05")))
+                vis_esc = html.escape(seg.get("visual", ""))
+                vo_esc = html.escape(seg.get("text", ""))
+                rows_html.append(
+                    f"<tr>"
+                    f"<td style='padding:10px 12px; border:1px solid #3a4454; white-space:nowrap; font-family:monospace; vertical-align:top;'>{tr_esc}</td>"
+                    f"<td style='padding:10px 12px; border:1px solid #3a4454; vertical-align:top;'>{vis_esc}</td>"
+                    f"<td style='padding:10px 12px; border:1px solid #3a4454; vertical-align:top;'>{vo_esc}</td>"
+                    f"</tr>"
+                )
+            table_html = (
+                "<table style='width:100%; border-collapse:collapse; font-size:0.92rem;'>"
+                "<thead><tr style='background-color:#1e293b; color:#f8fafc; text-align:left;'>"
+                "<th style='padding:10px 12px; border:1px solid #3a4454; width:20%;'>Estimasi Waktu</th>"
+                "<th style='padding:10px 12px; border:1px solid #3a4454; width:36%;'>Arahan Visual (Adegan Video)</th>"
+                "<th style='padding:10px 12px; border:1px solid #3a4454; width:44%;'>Naskah Voice Over (Audio)</th>"
+                "</tr></thead>"
+                f"<tbody>{''.join(rows_html)}</tbody></table>"
+            )
+            st.markdown(table_html, unsafe_allow_html=True)
+
+    with exp_col2:
+        with st.expander("📋 Input Cepat via Teks / Copy-Paste Tabel (Klik untuk membuka)", expanded=False):
+            st.caption(
+                "Tempelkan tabel dari Google Docs / Word atau format `00:00:00 - 00:00:05 | Arahan Visual | Naskah Voice Over`:"
+            )
+            quick_paste_default = (
+                "00:00:00 - 00:00:05 | Logo Cetakia dan judul \"Payment Method\" muncul. | "
+                "Selamat datang di panduan Cetakia. Kali ini, kita akan belajar cara menambahkan metode pembayaran baru.\n"
+                "00:00:06 - 00:00:11 | Dari Dashboard, buka menu \"Settings\", lalu klik \"Payment Methods\". | "
+                "Dari Dashboard, buka menu 'Settings' di sebelah kiri, lalu pilih 'Payment Methods'."
+            )
+            quick_paste_txt = st.text_area("Tempel format Tabel / Teks & Durasi:", value=quick_paste_default, height=110)
+            if st.button("📥 Terapkan Teks ke Tabel Storyboard"):
+                parsed_q = parse_raw_timeline_text(quick_paste_txt, auto_generate_if_no_timestamps=True)
+                if parsed_q:
+                    set_storyboard_segments(parsed_q)
+                    st.success(f"✓ Berhasil menerapkan {len(parsed_q)} segmen ke Tabel Storyboard (Format HH:MM:SS)!")
+                    st.rerun()
 
     st.markdown("---")
 
-    # Header Tabel Storyboard
-    hdr_c0, hdr_c1, hdr_c2, hdr_c3, hdr_c4 = st.columns([0.4, 1.5, 2.2, 3.6, 0.5])
+    # Header Tabel Storyboard (Sesuai Template 3 Kolom: Estimasi Waktu | Arahan Visual (Adegan Video) | Naskah Voice Over (Audio))
+    hdr_c0, hdr_c1, hdr_c2, hdr_c3, hdr_c4 = st.columns([0.35, 1.9, 2.7, 2.8, 0.65])
     hdr_c0.markdown("**No**")
-    hdr_c1.markdown("**⏱️ Estimasi Waktu (Durasi)**")
-    hdr_c2.markdown("**🎬 Arahan Visual (Adegan Video)** *(Opsional/Referensi)*")
-    hdr_c3.markdown("**🎙️ Naskah Voice Over (Audio yang Dibacakan AI)**")
-    hdr_c4.markdown("**Aksi**")
+    hdr_c1.markdown("**⏱️ Estimasi Waktu (Dropdown `Mulai` ➔ `Selesai`)**")
+    hdr_c2.markdown("**🎬 Arahan Visual (Adegan Video)**")
+    hdr_c3.markdown("**🎙️ Naskah Voice Over (Audio)**")
+    hdr_c4.markdown("**Aksi (Urutan / Hapus)**")
 
+    # Siapkan opsi dropdown timecode HH:MM:SS
+    extra_tcs = []
+    max_sec_found = 3600
+    for s in st.session_state.timeline_segments:
+        s_s, e_s = parse_time_range_str(s.get("time_range", ""))
+        max_sec_found = max(max_sec_found, int(e_s) + 120)
+        extra_tcs.append(format_seconds_to_hms(s_s, True))
+        extra_tcs.append(format_seconds_to_hms(e_s, True))
+
+    timecode_options = get_timecode_dropdown_options(max_seconds=max_sec_found, extra_timecodes=extra_tcs)
+
+    bver = st.session_state.board_version
     updated_segments = []
-    total_est_words = 0
+    move_action = None
+    delete_action = None
 
     for idx, seg in enumerate(st.session_state.timeline_segments):
-        c0, c1, c2, c3, c4 = st.columns([0.4, 1.5, 2.2, 3.6, 0.5])
+        c0, c1, c2, c3, c4 = st.columns([0.35, 1.9, 2.7, 2.8, 0.65])
         with c0:
             st.markdown(f"**#{idx+1}**")
 
         with c1:
-            t_val = st.text_input(
-                f"Rentang Waktu #{idx+1}",
-                value=seg.get("time_range", "00:00:00 - 00:00:05"),
-                key=f"tl_time_{idx}",
-                label_visibility="collapsed",
-                placeholder="00:00:00 - 00:00:05",
-            )
-            s_sec, e_sec = parse_time_range_str(t_val)
-            dur_slot = max(0.0, e_sec - s_sec)
-            st.caption(f"Detik **{s_sec:g}s** s/d **{e_sec:g}s** *(Slot: {dur_slot:g} dtk)*")
+            default_tr = normalize_to_hms_range(seg.get("time_range", "00:00:00 - 00:00:05"))
+            s_sec, e_sec = parse_time_range_str(default_tr)
+            start_hms = format_seconds_to_hms(s_sec, True)
+            end_hms = format_seconds_to_hms(e_sec, True)
+
+            if start_hms not in timecode_options:
+                timecode_options.append(start_hms)
+                timecode_options.sort()
+            if end_hms not in timecode_options:
+                timecode_options.append(end_hms)
+                timecode_options.sort()
+
+            start_idx = timecode_options.index(start_hms)
+            end_idx = timecode_options.index(end_hms)
+
+            sub_t1, sub_t2 = st.columns(2)
+            with sub_t1:
+                st.caption("🟢 **Mulai**")
+                s_val = st.selectbox(
+                    f"Mulai #{idx+1}",
+                    options=timecode_options,
+                    index=start_idx,
+                    key=f"tl_s_{bver}_{idx}",
+                    label_visibility="collapsed",
+                    help="Pilih jam:menit:detik mulai (HH:MM:SS)",
+                )
+            with sub_t2:
+                st.caption("🔴 **Selesai**")
+                e_val = st.selectbox(
+                    f"Selesai #{idx+1}",
+                    options=timecode_options,
+                    index=end_idx,
+                    key=f"tl_e_{bver}_{idx}",
+                    label_visibility="collapsed",
+                    help="Pilih jam:menit:detik selesai (HH:MM:SS)",
+                )
+
+            cur_s_sec = parse_timecode_to_seconds(s_val)
+            cur_e_sec = parse_timecode_to_seconds(e_val)
+            dur_slot = max(0.0, cur_e_sec - cur_s_sec)
+
+            if cur_e_sec > cur_s_sec:
+                t_val = f"{s_val} - {e_val}"
+                st.caption(f"✅ `{t_val}` *(Durasi: **{dur_slot:g} dtk**)*")
+            else:
+                cur_e_sec = cur_s_sec + 1.0
+                e_adj_hms = format_seconds_to_hms(cur_e_sec, True)
+                t_val = f"{s_val} - {e_adj_hms}"
+                st.caption(f"⚠️ Selesai ≤ Mulai *(Otomatis: **+{cur_e_sec - cur_s_sec:g} dtk**)*")
 
         with c2:
+            active_vpath = st.session_state.get("active_video_path")
+            if active_vpath and os.path.exists(active_vpath):
+                # Ekstrak thumbnail dengan disk caching persisten (sangat cepat & hemat CPU)
+                thumb_path = extract_video_thumbnail(active_vpath, s_val, output_size=260)
+                if thumb_path and os.path.exists(thumb_path):
+                    st.image(thumb_path, caption=f"🎬 Cuplikan Adegan @ {s_val}", use_container_width=True)
+
+                # Tombol navigasi adegan ke pemutar video utama (menghindari duplikasi video player berat di DOM browser)
+                if st.button(
+                    f"🎯 Pratinjau di Video Utama ({s_val})",
+                    key=f"seek_btn_{bver}_{idx}",
+                    help=f"Lompatkan pemutar video utama ke adegan detik {s_val}",
+                    use_container_width=True,
+                ):
+                    st.session_state.video_seek_time = int(cur_s_sec)
+                    st.rerun()
+
             vis_val = st.text_area(
                 f"Arahan Visual #{idx+1}",
                 value=seg.get("visual", ""),
-                key=f"tl_vis_{idx}",
-                height=88,
+                key=f"tl_vis_{bver}_{idx}",
+                height=70 if (active_vpath and os.path.exists(active_vpath)) else 88,
                 label_visibility="collapsed",
                 placeholder="Catatan adegan visual (tidak ikut dibacakan oleh AI)...",
             )
@@ -420,44 +775,91 @@ with tab_timeline:
             vo_val = st.text_area(
                 f"Naskah Voice Over #{idx+1}",
                 value=seg.get("text", ""),
-                key=f"tl_vo_{idx}",
+                key=f"tl_vo_{bver}_{idx}",
                 height=88,
                 label_visibility="collapsed",
                 placeholder="Teks narasi yang akan diucapkan pada rentang waktu ini...",
             )
             w_cnt = len(vo_val.split())
-            total_est_words += w_cnt
             est_sec = round(w_cnt / 2.4, 1)
-            status_color = "🟢" if est_sec <= dur_slot + 1.0 else "🟡 (Akan di-Auto-Fit)"
-            st.caption(f"{w_cnt} kata (~{est_sec} dtk bicara normal) {status_color}")
+            status_color = "🟢 Pas di slot" if est_sec <= dur_slot + 0.8 else "🟡 Akan di-Auto-Fit ke slot durasi"
+            st.caption(f"**{w_cnt} kata** (~{est_sec} dtk bicara normal) • {status_color}")
 
         with c4:
-            del_clicked = st.button("🗑️", key=f"tl_del_{idx}", help="Hapus segmen waktu ini")
+            b_u, b_d = st.columns(2)
+            with b_u:
+                up_clicked = st.button(
+                    "⬆️",
+                    key=f"tl_up_{bver}_{idx}",
+                    disabled=(idx == 0),
+                    help="Pindah segmen ini ke atas (Tukar posisi dengan baris sebelumnya)",
+                )
+            with b_d:
+                dn_clicked = st.button(
+                    "⬇️",
+                    key=f"tl_dn_{bver}_{idx}",
+                    disabled=(idx == len(st.session_state.timeline_segments) - 1),
+                    help="Pindah segmen ini ke bawah (Tukar posisi dengan baris berikutnya)",
+                )
+            del_clicked = st.button(
+                "🗑️",
+                key=f"tl_del_{bver}_{idx}",
+                help="Hapus segmen waktu ini",
+                use_container_width=True,
+            )
 
-        if not del_clicked:
-            updated_segments.append({
-                "time_range": t_val,
-                "visual": vis_val,
-                "text": vo_val,
-            })
+        if up_clicked:
+            move_action = ("up", idx)
+        elif dn_clicked:
+            move_action = ("down", idx)
+        elif del_clicked:
+            delete_action = idx
 
-    st.session_state.timeline_segments = updated_segments
+        updated_segments.append({
+            "time_range": t_val,
+            "visual": vis_val,
+            "text": vo_val,
+        })
+
+    if delete_action is not None:
+        del updated_segments[delete_action]
+        set_storyboard_segments(updated_segments)
+        st.rerun()
+    elif move_action is not None:
+        act, m_idx = move_action
+        if act == "up" and m_idx > 0:
+            updated_segments[m_idx], updated_segments[m_idx - 1] = (
+                updated_segments[m_idx - 1],
+                updated_segments[m_idx],
+            )
+        elif act == "down" and m_idx < len(updated_segments) - 1:
+            updated_segments[m_idx], updated_segments[m_idx + 1] = (
+                updated_segments[m_idx + 1],
+                updated_segments[m_idx],
+            )
+        set_storyboard_segments(updated_segments)
+        st.rerun()
+    else:
+        st.session_state.timeline_segments = updated_segments
 
     # Tombol Tambah Segmen & Tombol Generate Utama
     act_c1, act_c2 = st.columns([1.2, 2.8])
     with act_c1:
-        if st.button("➕ Tambah Baris Segmen Waktu", use_container_width=True):
+        if st.button("➕ Tambah Baris Segmen Waktu (HH:MM:SS)", use_container_width=True):
             if st.session_state.timeline_segments:
                 last_s, last_e = parse_time_range_str(st.session_state.timeline_segments[-1]["time_range"])
                 next_s = last_e + 1.0
                 next_e = next_s + 5.0
             else:
                 next_s, next_e = 0.0, 5.0
-            st.session_state.timeline_segments.append({
-                "time_range": f"{format_seconds_to_hms(next_s)} - {format_seconds_to_hms(next_e)}",
-                "visual": "",
-                "text": "",
-            })
+            new_list = list(st.session_state.timeline_segments) + [
+                {
+                    "time_range": f"{format_seconds_to_hms(next_s, True)} - {format_seconds_to_hms(next_e, True)}",
+                    "visual": "",
+                    "text": "",
+                }
+            ]
+            set_storyboard_segments(new_list)
             st.rerun()
 
     with act_c2:
@@ -473,7 +875,16 @@ with tab_timeline:
         if not non_empty:
             st.warning("Silakan isi minimal 1 baris Naskah Voice Over terlebih dahulu.")
         else:
-            prog_bar = st.progress(0, text="Memulai proses generasi suara per segmen waktu...")
+            # Standarkan tampilan tabel ke HH:MM:SS - HH:MM:SS
+            normalized_for_gen = [
+                {
+                    "time_range": normalize_to_hms_range(s.get("time_range", "00:00:00 - 00:00:05")),
+                    "visual": s.get("visual", ""),
+                    "text": s.get("text", ""),
+                }
+                for s in st.session_state.timeline_segments
+            ]
+            prog_bar = st.progress(0, text="Memulai proses generasi suara per segmen waktu (HH:MM:SS)...")
 
             def update_prog(curr_idx, total_cnt, msg):
                 prog_bar.progress(int((curr_idx / max(1, total_cnt)) * 90), text=msg)
@@ -481,9 +892,15 @@ with tab_timeline:
             try:
                 tl_result = generate_timeline_voiceover(
                     client=client,
-                    segments=st.session_state.timeline_segments,
+                    segments=normalized_for_gen,
                     voice_id=selected_voice_id,
                     voice_name=selected_voice.get("name", "Zen"),
+                    video_path=st.session_state.get("active_video_path"),
+                    feature_name=st.session_state.get("feature_name", "Payment_Method"),
+                    burn_subtitles=burn_subtitles_flag,
+                    subtitle_style=sub_style_choice,
+                    subtitle_font_size=sub_font_size,
+                    subtitle_ypad=sub_ypad,
                     model_id=selected_model_id,
                     stability=stability,
                     similarity_boost=similarity_boost,
@@ -495,8 +912,12 @@ with tab_timeline:
                     progress_callback=update_prog,
                 )
                 prog_bar.progress(100, text="✓ Seluruh segmen selesai dirakit ke Master Timeline!")
+                import time
+                time.sleep(0.3)
+                prog_bar.empty()
                 st.session_state["last_timeline_result"] = tl_result
                 st.session_state["last_timeline_voice"] = selected_voice.get("name")
+                st.rerun()
             except Exception as e:
                 prog_bar.empty()
                 st.error(f"Gagal memproses timeline: {e}")
@@ -510,47 +931,121 @@ with tab_timeline:
         st.subheader("🎧 Hasil Audio Master Timeline & Sinkronisasi")
         st.success(
             f"✓ Voice Over Timeline selesai dirakit dengan suara **{vname_tl}** | "
-            f"Total Durasi Timeline: **{format_seconds_to_hms(tl_res['total_timeline_sec'])} ({tl_res['total_timeline_sec']} detik)** | "
+            f"Total Durasi Timeline: **`{format_seconds_to_hms(tl_res['total_timeline_sec'], True)}` ({tl_res['total_timeline_sec']} detik)** | "
             f"Waktu Proses API: **{tl_res['elapsed_sec']} detik**"
         )
 
-        # Pemutar Audio Utama
-        st.audio(tl_res["audio_bytes"], format=tl_res["mime_type"])
+        # Stream audio master langsung dari disk (sangat cepat & hemat RAM WebSocket)
+        if tl_res.get("audio_path") and os.path.exists(tl_res["audio_path"]):
+            st.audio(tl_res["audio_path"], format=tl_res.get("mime_type", "audio/mpeg"))
+        elif tl_res.get("audio_bytes"):
+            st.audio(tl_res["audio_bytes"], format=tl_res.get("mime_type", "audio/mpeg"))
 
-        dl_c1, dl_c2, dl_c3 = st.columns(3)
-        with dl_c1:
-            st.download_button(
-                label=f"⬇️ Unduh Master Audio (.{tl_res['extension'].upper()})",
-                data=tl_res["audio_bytes"],
-                file_name=os.path.basename(tl_res["audio_path"]),
-                mime=tl_res["mime_type"],
-                use_container_width=True,
+        # Tampilkan Status Video Final Dubbing jika video acuan aktif
+        dub_vpath = tl_res.get("dubbed_video_path")
+        if dub_vpath and os.path.exists(dub_vpath):
+            st.markdown("---")
+            st.markdown("### 🎬 Video Final + Voice Over Terpadu & Subtitle (Bottom Center)")
+            st.success(
+                f"✓ Video `{st.session_state.get('active_video_name', 'Video')}` telah digabungkan secara otomatis "
+                f"dengan audio Voice Over AI & **Subtitle Teks Naskah (Bottom Center)** berdurasi **`{format_seconds_to_hms(tl_res['total_timeline_sec'], True)}`**!  \n"
+                f"💡 **Tonton Langsung:** Anda dapat menonton video dubbing bersubtitle ini langsung pada **Pemutar Video Utama** "
+                f"di bagian atas (pilih opsi *'🎬 Video Final Dubbing'*), atau buka pemutar di bawah ini."
             )
-        with dl_c2:
-            st.download_button(
-                label="⬇️ Unduh Master Uncompressed (.WAV)",
-                data=tl_res["wav_bytes"],
-                file_name=os.path.basename(tl_res["wav_path"]),
-                mime="audio/wav",
-                use_container_width=True,
-            )
-        with dl_c3:
-            st.download_button(
-                label="⬇️ Unduh Subtitle Sinkron (.SRT)",
-                data=tl_res["srt_content"].encode("utf-8"),
-                file_name=os.path.basename(tl_res["srt_path"]),
-                mime="text/plain",
-                use_container_width=True,
+            # Expander tertutup secara default agar hemat hardware video decoding surface di browser
+            with st.expander("📺 Buka Pemutar Video Dubbing di Sini (Opsional)", expanded=False):
+                st.video(dub_vpath)
+
+        # Opsi Unduh Terpadu On-Demand (Mengirim 1 file saja saat dipilih, tidak membebani WebSocket)
+        st.markdown("---")
+        st.markdown("#### ⬇️ Unduh File Hasil Generasi")
+        dl_col1, dl_col2 = st.columns([1.8, 2.2])
+        with dl_col1:
+            dl_opts = [
+                f"🎙️ Master Audio (.{tl_res['extension'].upper()})",
+                "⏱️ Subtitle Sinkron (.SRT)",
+                "🎼 Master Uncompressed (.WAV)",
+            ]
+            if dub_vpath and os.path.exists(dub_vpath):
+                dl_opts.insert(0, "🎬 Video Final Dubbing (.MP4)")
+
+            chosen_dl = st.selectbox("Pilih File yang Ingin Diunduh:", options=dl_opts, key="sb_chosen_dl")
+
+        with dl_col2:
+            m_date = None
+            if dub_vpath:
+                m_date = re.search(r"(\d{8})", os.path.basename(dub_vpath))
+            if not m_date and tl_res.get("audio_path"):
+                m_date = re.search(r"(\d{8})", os.path.basename(tl_res["audio_path"]))
+            date_tag = m_date.group(1) if m_date else datetime.now().strftime("%Y%m%d")
+
+            current_feat = (
+                tl_res.get("feature_name")
+                or st.session_state.get("feature_name")
+                or "Payment_Method"
             )
 
-        # Tabel Laporan Penempatan Waktu Tiap Segmen
-        st.markdown("#### 📊 Detail Penempatan Waktu & Durasi Tiap Segmen")
+            # Tentukan file target, ekstensi, dan mime type sesuai file yang dipilih user
+            if "Video Final" in chosen_dl and dub_vpath and os.path.exists(dub_vpath):
+                target_file_path = dub_vpath
+                target_mime = "video/mp4"
+                file_ext = "mp4"
+                default_dl_name = f"{date_tag}-{current_feat}.mp4"
+            elif "Master Audio" in chosen_dl and tl_res.get("audio_path") and os.path.exists(tl_res["audio_path"]):
+                target_file_path = tl_res["audio_path"]
+                target_mime = tl_res["mime_type"]
+                file_ext = tl_res["extension"]
+                default_dl_name = f"{date_tag}-{current_feat}.{file_ext}"
+            elif "Subtitle" in chosen_dl and tl_res.get("srt_path") and os.path.exists(tl_res["srt_path"]):
+                target_file_path = tl_res["srt_path"]
+                target_mime = "text/plain"
+                file_ext = "srt"
+                default_dl_name = f"{date_tag}-{current_feat}.srt"
+            elif "Master Uncompressed" in chosen_dl and tl_res.get("wav_path") and os.path.exists(tl_res["wav_path"]):
+                target_file_path = tl_res["wav_path"]
+                target_mime = "audio/wav"
+                file_ext = "wav"
+                default_dl_name = f"{date_tag}-{current_feat}.wav"
+            else:
+                target_file_path = None
+                target_mime = None
+                file_ext = "mp4"
+                default_dl_name = f"{date_tag}-{current_feat}.mp4"
+
+            if target_file_path and os.path.exists(target_file_path):
+                # Input form teks kustomisasi nama file download sesuai permintaan user
+                custom_name_input = st.text_input(
+                    f"✏️ Kustomisasi Nama File Unduh (.{file_ext.upper()}):",
+                    value=st.session_state.get(f"custom_dl_filename_{file_ext}", default_dl_name),
+                    key=f"input_custom_dl_filename_{file_ext}",
+                    help=f"Anda bebas mengubah teks nama file ini sesuai kebutuhan sebelum mengunduh. Otomatis berekstensi .{file_ext}",
+                )
+
+                clean_name = custom_name_input.strip()
+                if not clean_name:
+                    clean_name = default_dl_name
+                if not clean_name.lower().endswith(f".{file_ext}"):
+                    clean_name = f"{clean_name}.{file_ext}"
+
+                with open(target_file_path, "rb") as df:
+                    file_bytes = df.read()
+
+                st.download_button(
+                    label=f"⬇️ Unduh {clean_name}",
+                    data=file_bytes,
+                    file_name=clean_name,
+                    mime=target_mime,
+                    type="primary",
+                    use_container_width=True,
+                )
+
+        st.markdown("#### 📊 Detail Penempatan Waktu & Durasi Tiap Segmen (`HH:MM:SS`)")
         report_rows = []
         for r in tl_res["segments_report"]:
             report_rows.append({
                 "Segmen": f"#{r['orig_index']}",
-                "Target Rentang User": f"{r['time_range']} ({r['target_dur']}s)",
-                "Posisi Aktual di Audio": f"{format_seconds_to_hms(r['actual_start_sec'])} - {format_seconds_to_hms(r['actual_end_sec'])} ({r['actual_start_sec']}s – {r['actual_end_sec']}s)",
+                "Rentang Target (HH:MM:SS)": f"{r['time_range']} ({r['target_dur']}s)",
+                "Posisi Aktual di Audio": f"{format_seconds_to_hms(r['actual_start_sec'], True)} - {format_seconds_to_hms(r['actual_end_sec'], True)} ({r['actual_start_sec']}s – {r['actual_end_sec']}s)",
                 "Durasi Asli AI": f"{r['orig_dur_sec']} dtk",
                 "Durasi Akhir Narasi": f"{r['final_dur_sec']} dtk",
                 "Jeda Hening Setelahnya": f"{r['silence_pad_sec']} dtk",
@@ -562,15 +1057,26 @@ with tab_timeline:
         col_sub1, col_sub2 = st.columns(2)
         with col_sub1:
             with st.expander("🔍 Putar Audio Per-Segmen Secara Terpisah", expanded=False):
-                for r in tl_res["segments_report"]:
-                    st.markdown(
-                        f"**Segmen #{r['orig_index']} (`{r['time_range']}`)** — "
-                        f"*Mulai di detik {r['actual_start_sec']}s (Durasi: {r['final_dur_sec']}s, Kecepatan: {r['speed_multiplier']}x)*"
-                    )
-                    if r.get("visual"):
-                        st.caption(f"🎬 Arahan Visual: {r['visual']}")
-                    st.write(r["text"])
-                    st.audio(r["segment_audio_bytes"], format=r["segment_mime"])
+                st.caption("Pilih salah satu segmen untuk mendengarkan potongan suara terpisah (sangat ringan & hemat RAM):")
+                seg_choices = [
+                    f"Segmen #{r['orig_index']} ({r['time_range']}) - {r['text'][:38]}..."
+                    for r in tl_res["segments_report"]
+                ]
+                sel_seg_name = st.selectbox("Pilih Segmen Waktu:", options=seg_choices, key="sel_seg_audio_player")
+                sel_idx = seg_choices.index(sel_seg_name)
+                r_active = tl_res["segments_report"][sel_idx]
+                st.markdown(
+                    f"**Segmen #{r_active['orig_index']} (`{r_active['time_range']}`)** — "
+                    f"*Mulai di `{format_seconds_to_hms(r_active['actual_start_sec'], True)}` "
+                    f"(Durasi: {r_active['final_dur_sec']}s, Kecepatan: {r_active['speed_multiplier']}x)*"
+                )
+                if r_active.get("visual"):
+                    st.caption(f"🎬 Arahan Visual: {r_active['visual']}")
+                st.write(r_active["text"])
+                if r_active.get("segment_audio_path") and os.path.exists(r_active["segment_audio_path"]):
+                    st.audio(r_active["segment_audio_path"], format=r_active.get("segment_mime", "audio/wav"))
+                elif r_active.get("segment_audio_bytes"):
+                    st.audio(r_active["segment_audio_bytes"], format=r_active.get("segment_mime", "audio/wav"))
 
         with col_sub2:
             with st.expander("📄 Pratinjau File Subtitle (.SRT) sesuai Rentang Waktu", expanded=True):
@@ -825,4 +1331,34 @@ with tab_history:
                             file_name=os.path.basename(srt_p),
                             mime="text/plain",
                             key=f"dl_srt_{item['id']}",
+                        )
+                    video_p = item.get("video_path")
+                    if not video_p and audio_p:
+                        candidate_v = audio_p.replace(".mp3", "_dubbed.mp4").replace(".wav", "_dubbed.mp4")
+                        if os.path.exists(candidate_v):
+                            video_p = candidate_v
+                    if video_p and os.path.exists(video_p):
+                        m_vdate = re.search(r"(\d{8})", os.path.basename(video_p))
+                        v_date_tag = m_vdate.group(1) if m_vdate else datetime.now().strftime("%Y%m%d")
+                        v_feat = item.get("feature_name")
+                        if not v_feat:
+                            item_text = (item.get("text") or "").lower()
+                            if "payment" in item_text or "payment" in video_p.lower():
+                                v_feat = "Payment_Method"
+                            elif "component" in item_text or "komponen" in item_text:
+                                v_feat = "Component"
+                            elif "user" in item_text:
+                                v_feat = "Create_User"
+                            else:
+                                v_feat = "Payment_Method"
+                        clean_v_feat = re.sub(r"[^\w\-]+", "_", str(v_feat).strip()).strip("_") or "Payment_Method"
+                        v_custom_name = f"{v_date_tag}-{clean_v_feat}.mp4"
+                        with open(video_p, "rb") as vf:
+                            v_data = vf.read()
+                        st.download_button(
+                            f"🎬 Unduh {v_custom_name}",
+                            data=v_data,
+                            file_name=v_custom_name,
+                            mime="video/mp4",
+                            key=f"dl_vid_{item['id']}",
                         )

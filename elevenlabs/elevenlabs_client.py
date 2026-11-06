@@ -348,6 +348,7 @@ class ElevenLabsStudioClient:
 
         return {
             "audio_bytes": audio_bytes,
+            "raw_audio": raw_audio,
             "mime_type": mime_type,
             "extension": ext,
             "elapsed_sec": round(elapsed, 2),
@@ -357,6 +358,55 @@ class ElevenLabsStudioClient:
             "audio_path": saved_audio_path,
             "srt_path": saved_srt_path,
         }
+
+    def text_to_speech(
+        self,
+        text: str,
+        voice_id: str = ZEN_PRIMARY_VOICE_ID,
+        model_id: str = "eleven_multilingual_v2",
+        output_format: str = "pcm_24000",
+        stability: float = 0.55,
+        similarity_boost: float = 0.80,
+        style: float = 0.0,
+        speed: float = 1.0,
+        use_speaker_boost: bool = True,
+        previous_text: Optional[str] = None,
+        next_text: Optional[str] = None,
+        **kwargs,
+    ) -> bytes:
+        """
+        Menghasilkan byte audio mentah (PCM atau MP3) langsung dari ElevenLabs API
+        tanpa menyimpan ke disk. Sangat cocok untuk modul timeline voiceover engine.
+        """
+        res = self.generate_speech(
+            text=text,
+            voice_id=voice_id,
+            model_id=model_id,
+            stability=stability,
+            similarity_boost=similarity_boost,
+            style=style,
+            speed=speed,
+            use_speaker_boost=use_speaker_boost,
+            output_format=output_format,
+            previous_text=previous_text,
+            next_text=next_text,
+            save_to_disk=False,
+            with_timestamps=False,
+        )
+        return res.get("raw_audio") or res.get("audio_bytes", b"")
+
+    def get_voice_name(self, voice_id: str) -> str:
+        """Mengambil nama tampilan untuk sebuah voice_id."""
+        if voice_id == ZEN_PRIMARY_VOICE_ID:
+            return "Zen"
+        try:
+            voices = self.get_voices()
+            for v in voices:
+                if v.get("voice_id") == voice_id:
+                    return v.get("name", "Voice")
+        except Exception:
+            pass
+        return "Voice"
 
     def stream_speech(
         self,

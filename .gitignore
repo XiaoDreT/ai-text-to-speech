@@ -4,6 +4,8 @@ groq/
 # Hasil generasi audio & riwayat lokal ElevenLabs
 elevenlabs/outputs/
 outputs/
+.thumbnails/
+**/.thumbnails/
 
 # Python cache & virtual environments
 __pycache__/
@@ -12,6 +14,8 @@ __pycache__/
 .venv/
 venv/
 env/
+
+reference_videos
 
 # Environment variables
 .env
