@@ -470,14 +470,17 @@ with tab_timeline:
                 sample_text = sample_seg["text"] if sample_seg else "Selamat datang di panduan Cetakia."
                 sample_tc = sample_seg.get("time_range", "00:00:10").split("-")[0].strip() if sample_seg else "00:00:10"
 
-                prev_img_p = generate_subtitle_preview_image(
-                    video_path=st.session_state.get("active_video_path"),
-                    text=sample_text,
-                    timestamp_hms=sample_tc,
-                    subtitle_style=sub_style_choice,
-                    font_size=sub_font_size,
-                    ypad=sub_ypad,
-                )
+                try:
+                    prev_img_p = generate_subtitle_preview_image(
+                        video_path=st.session_state.get("active_video_path"),
+                        text=sample_text,
+                        timestamp_hms=sample_tc,
+                        subtitle_style=sub_style_choice,
+                        font_size=sub_font_size,
+                        ypad=sub_ypad,
+                    )
+                except Exception:
+                    prev_img_p = None
                 if prev_img_p and os.path.exists(prev_img_p):
                     st.markdown("---")
                     st.markdown("**🖼️ Pratinjau Subtitle pada Frame Video:**")

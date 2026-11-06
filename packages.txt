@@ -1,0 +1,4 @@
+ffmpeg
+ffmpegthumbnailer
+fonts-liberation
+

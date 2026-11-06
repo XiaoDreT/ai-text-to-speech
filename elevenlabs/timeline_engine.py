@@ -27,6 +27,7 @@ import wave
 import ctypes
 import zipfile
 import tempfile
+import shutil
 import subprocess
 import hashlib
 import gc
@@ -1421,20 +1422,72 @@ def extract_video_thumbnail(
                     return f.read()
             return target_path
 
-        cmd = [
-            "ffmpegthumbnailer",
-            "-i", video_path,
-            "-o", target_path,
-            "-t", tc_formatted,
-            "-s", str(output_size),
-            "-q", "8",
-        ]
-        res = subprocess.run(cmd, capture_output=True, timeout=5)
-        if res.returncode == 0 and os.path.exists(target_path) and os.path.getsize(target_path) > 0:
-            if return_bytes:
-                with open(target_path, "rb") as f:
-                    return f.read()
-            return target_path
+        # 1. Coba ffmpegthumbnailer
+        if shutil.which("ffmpegthumbnailer"):
+            try:
+                cmd = [
+                    "ffmpegthumbnailer",
+                    "-i", video_path,
+                    "-o", target_path,
+                    "-t", tc_formatted,
+                    "-s", str(output_size),
+                    "-q", "8",
+                ]
+                res = subprocess.run(cmd, capture_output=True, timeout=5)
+                if res.returncode == 0 and os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+                    if return_bytes:
+                        with open(target_path, "rb") as f:
+                            return f.read()
+                    return target_path
+            except Exception:
+                pass
+
+        # 2. Coba ffmpeg
+        if shutil.which("ffmpeg"):
+            try:
+                cmd_ff = [
+                    "ffmpeg", "-y",
+                    "-ss", tc_formatted,
+                    "-i", video_path,
+                    "-vframes", "1",
+                    "-vf", f"scale={output_size}:-1",
+                    "-q:v", "3",
+                    target_path,
+                ]
+                res = subprocess.run(cmd_ff, capture_output=True, timeout=5)
+                if res.returncode == 0 and os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+                    if return_bytes:
+                        with open(target_path, "rb") as f:
+                            return f.read()
+                    return target_path
+            except Exception:
+                pass
+
+        # 3. Coba cv2 jika tersedia
+        try:
+            import cv2
+            cap = cv2.VideoCapture(video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            frame_no = int(s_sec * fps)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+            ret, frame = cap.read()
+            if not ret:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret, frame = cap.read()
+            if ret and frame is not None:
+                h_f, w_f = frame.shape[:2]
+                target_h = int(output_size * (h_f / float(w_f)))
+                frame_resized = cv2.resize(frame, (output_size, target_h))
+                cv2.imwrite(target_path, frame_resized)
+                cap.release()
+                if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+                    if return_bytes:
+                        with open(target_path, "rb") as f:
+                            return f.read()
+                    return target_path
+            cap.release()
+        except Exception:
+            pass
     except Exception:
         pass
     return b"" if return_bytes else None
@@ -1483,114 +1536,163 @@ def generate_subtitle_preview_image(
     except ImportError:
         return None
 
-    if not cache_dir:
-        if video_path and os.path.exists(video_path):
-            base_dir = os.path.dirname(os.path.abspath(video_path))
-        else:
-            base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
-        cache_dir = os.path.join(base_dir, ".thumbnails")
-    os.makedirs(cache_dir, exist_ok=True)
-
-    chosen_vpath = video_path if (video_path and os.path.exists(video_path)) else None
-    if not chosen_vpath and os.path.exists(REFERENCE_PAYMENT_METHOD_VIDEO_PATH):
-        chosen_vpath = REFERENCE_PAYMENT_METHOD_VIDEO_PATH
-
-    v_mtime = int(os.path.getmtime(chosen_vpath)) if chosen_vpath and os.path.exists(chosen_vpath) else 0
-
-    clean_text = str(text or "").strip()
-    if not clean_text:
-        clean_text = "Selamat datang di panduan Cetakia. Buka menu Settings, lalu pilih Payment Methods."
-
-    h_str = f"{chosen_vpath}_{v_mtime}_{timestamp_hms}_{clean_text}_{subtitle_style}_{font_size}_{ypad}_{output_width}"
-    h_val = hashlib.md5(h_str.encode("utf-8")).hexdigest()
-    out_path = os.path.join(cache_dir, f"sub_prev_{h_val}.jpg")
-    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-        return out_path
-
-    raw_frame_path = None
-    if chosen_vpath and os.path.exists(chosen_vpath):
-        raw_h = hashlib.md5(f"{chosen_vpath}_{v_mtime}_{timestamp_hms}_{output_width}".encode("utf-8")).hexdigest()
-        raw_frame_path = os.path.join(cache_dir, f"raw_frame_{raw_h}.jpg")
-        if not (os.path.exists(raw_frame_path) and os.path.getsize(raw_frame_path) > 0):
-            tc_sec = parse_timecode_to_seconds(str(timestamp_hms).split("-")[0].strip())
-            tc_fmt = format_seconds_to_hms(tc_sec, True)
-            cmd = [
-                "ffmpegthumbnailer",
-                "-i", chosen_vpath,
-                "-o", raw_frame_path,
-                "-t", tc_fmt,
-                "-s", str(output_width),
-                "-q", "8",
-            ]
-            subprocess.run(cmd, capture_output=True, timeout=5)
-
-    if raw_frame_path and os.path.exists(raw_frame_path) and os.path.getsize(raw_frame_path) > 0:
-        try:
-            img = Image.open(raw_frame_path).convert("RGB")
-        except Exception:
-            img = Image.new("RGB", (output_width, int(output_width * 9 / 16)), color=(26, 32, 44))
-    else:
-        h_canvas = int(output_width * 9 / 16)
-        img = Image.new("RGB", (output_width, h_canvas), color=(26, 32, 44))
-
-    w, h = img.size
-    scale = w / 720.0
-    actual_fs = max(11, int(round(font_size * scale * 1.15)))
-    actual_ypad = max(6, int(round(ypad * scale)))
-
-    font_path = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
-    if not os.path.exists(font_path):
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     try:
-        font = ImageFont.truetype(font_path, size=actual_fs)
+        if not cache_dir:
+            if video_path and os.path.exists(video_path):
+                base_dir = os.path.dirname(os.path.abspath(video_path))
+            else:
+                base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
+            cache_dir = os.path.join(base_dir, ".thumbnails")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        chosen_vpath = video_path if (video_path and os.path.exists(video_path)) else None
+        if not chosen_vpath and os.path.exists(REFERENCE_PAYMENT_METHOD_VIDEO_PATH):
+            chosen_vpath = REFERENCE_PAYMENT_METHOD_VIDEO_PATH
+
+        v_mtime = int(os.path.getmtime(chosen_vpath)) if chosen_vpath and os.path.exists(chosen_vpath) else 0
+
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            clean_text = "Selamat datang di panduan Cetakia. Buka menu Settings, lalu pilih Payment Methods."
+
+        h_str = f"{chosen_vpath}_{v_mtime}_{timestamp_hms}_{clean_text}_{subtitle_style}_{font_size}_{ypad}_{output_width}"
+        h_val = hashlib.md5(h_str.encode("utf-8")).hexdigest()
+        out_path = os.path.join(cache_dir, f"sub_prev_{h_val}.jpg")
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+
+        raw_frame_path = None
+        if chosen_vpath and os.path.exists(chosen_vpath):
+            raw_h = hashlib.md5(f"{chosen_vpath}_{v_mtime}_{timestamp_hms}_{output_width}".encode("utf-8")).hexdigest()
+            raw_frame_path = os.path.join(cache_dir, f"raw_frame_{raw_h}.jpg")
+            if not (os.path.exists(raw_frame_path) and os.path.getsize(raw_frame_path) > 0):
+                tc_sec = parse_timecode_to_seconds(str(timestamp_hms).split("-")[0].strip())
+                tc_fmt = format_seconds_to_hms(tc_sec, True)
+                extracted = False
+
+                # 1. Coba ffmpegthumbnailer jika tersedia
+                if shutil.which("ffmpegthumbnailer"):
+                    try:
+                        cmd = [
+                            "ffmpegthumbnailer",
+                            "-i", chosen_vpath,
+                            "-o", raw_frame_path,
+                            "-t", tc_fmt,
+                            "-s", str(output_width),
+                            "-q", "8",
+                        ]
+                        res = subprocess.run(cmd, capture_output=True, timeout=5)
+                        extracted = res.returncode == 0 and os.path.exists(raw_frame_path) and os.path.getsize(raw_frame_path) > 0
+                    except Exception:
+                        extracted = False
+
+                # 2. Coba ffmpeg jika ffmpegthumbnailer tidak ada
+                if not extracted and shutil.which("ffmpeg"):
+                    try:
+                        cmd_ff = [
+                            "ffmpeg", "-y",
+                            "-ss", tc_fmt,
+                            "-i", chosen_vpath,
+                            "-vframes", "1",
+                            "-vf", f"scale={output_width}:-1",
+                            "-q:v", "3",
+                            raw_frame_path,
+                        ]
+                        res = subprocess.run(cmd_ff, capture_output=True, timeout=5)
+                        extracted = res.returncode == 0 and os.path.exists(raw_frame_path) and os.path.getsize(raw_frame_path) > 0
+                    except Exception:
+                        extracted = False
+
+                # 3. Coba cv2 jika tersedia
+                if not extracted:
+                    try:
+                        import cv2
+                        cap = cv2.VideoCapture(chosen_vpath)
+                        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+                        frame_no = int(tc_sec * fps)
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+                        ret, frame = cap.read()
+                        if not ret:
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            ret, frame = cap.read()
+                        if ret and frame is not None:
+                            h_f, w_f = frame.shape[:2]
+                            target_h = int(output_width * (h_f / float(w_f)))
+                            frame_resized = cv2.resize(frame, (output_width, target_h))
+                            cv2.imwrite(raw_frame_path, frame_resized)
+                        cap.release()
+                    except Exception:
+                        pass
+
+        if raw_frame_path and os.path.exists(raw_frame_path) and os.path.getsize(raw_frame_path) > 0:
+            try:
+                img = Image.open(raw_frame_path).convert("RGB")
+            except Exception:
+                img = Image.new("RGB", (output_width, int(output_width * 9 / 16)), color=(26, 32, 44))
+        else:
+            h_canvas = int(output_width * 9 / 16)
+            img = Image.new("RGB", (output_width, h_canvas), color=(26, 32, 44))
+
+        w, h = img.size
+        scale = w / 720.0
+        actual_fs = max(11, int(round(font_size * scale * 1.15)))
+        actual_ypad = max(6, int(round(ypad * scale)))
+
+        font_path = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+        if not os.path.exists(font_path):
+            font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        try:
+            font = ImageFont.truetype(font_path, size=actual_fs)
+        except Exception:
+            font = ImageFont.load_default()
+
+        draw = ImageDraw.Draw(img, "RGBA")
+        max_text_width = int(w * 0.82)
+        avg_char_w = max(6.0, actual_fs * 0.55)
+        chars_per_line = max(20, int(max_text_width / avg_char_w))
+        wrapped_lines = textwrap.wrap(clean_text, width=chars_per_line) or [clean_text]
+
+        line_bboxes = [draw.textbbox((0, 0), line, font=font) for line in wrapped_lines]
+        line_heights = [(bb[3] - bb[1]) for bb in line_bboxes]
+        line_spacing = int(actual_fs * 0.3)
+        total_text_h = sum(line_heights) + line_spacing * (len(wrapped_lines) - 1)
+        
+        y_start = max(10, h - total_text_h - actual_ypad)
+
+        current_y = y_start
+        for i, line in enumerate(wrapped_lines):
+            bb = line_bboxes[i]
+            lw = bb[2] - bb[0]
+            lh = bb[3] - bb[1]
+            lx = (w - lw) // 2
+
+            if subtitle_style == "shaded_box":
+                pad_x = int(actual_fs * 0.6)
+                pad_y = int(actual_fs * 0.25)
+                box_rect = [lx - pad_x, current_y - pad_y, lx + lw + pad_x, current_y + lh + pad_y]
+                draw.rectangle(box_rect, fill=(15, 23, 42, 185))
+                draw.text((lx, current_y), line, font=font, fill=(255, 255, 255, 255))
+            elif subtitle_style == "yellow_outline":
+                outline_w = max(2, int(actual_fs * 0.12))
+                for dx in range(-outline_w, outline_w + 1):
+                    for dy in range(-outline_w, outline_w + 1):
+                        if dx * dx + dy * dy <= outline_w * outline_w:
+                            draw.text((lx + dx, current_y + dy), line, font=font, fill=(0, 0, 0, 255))
+                draw.text((lx, current_y), line, font=font, fill=(255, 235, 59, 255))
+            else:  # outline
+                outline_w = max(2, int(actual_fs * 0.12))
+                for dx in range(-outline_w, outline_w + 1):
+                    for dy in range(-outline_w, outline_w + 1):
+                        if dx * dx + dy * dy <= outline_w * outline_w:
+                            draw.text((lx + dx, current_y + dy), line, font=font, fill=(0, 0, 0, 255))
+                draw.text((lx, current_y), line, font=font, fill=(255, 255, 255, 255))
+
+            current_y += lh + line_spacing
+
+        img.convert("RGB").save(out_path, quality=90)
+        return out_path
     except Exception:
-        font = ImageFont.load_default()
-
-    draw = ImageDraw.Draw(img, "RGBA")
-    max_text_width = int(w * 0.82)
-    avg_char_w = max(6.0, actual_fs * 0.55)
-    chars_per_line = max(20, int(max_text_width / avg_char_w))
-    wrapped_lines = textwrap.wrap(clean_text, width=chars_per_line) or [clean_text]
-
-    line_bboxes = [draw.textbbox((0, 0), line, font=font) for line in wrapped_lines]
-    line_heights = [(bb[3] - bb[1]) for bb in line_bboxes]
-    line_spacing = int(actual_fs * 0.3)
-    total_text_h = sum(line_heights) + line_spacing * (len(wrapped_lines) - 1)
-    
-    y_start = max(10, h - total_text_h - actual_ypad)
-
-    current_y = y_start
-    for i, line in enumerate(wrapped_lines):
-        bb = line_bboxes[i]
-        lw = bb[2] - bb[0]
-        lh = bb[3] - bb[1]
-        lx = (w - lw) // 2
-
-        if subtitle_style == "shaded_box":
-            pad_x = int(actual_fs * 0.6)
-            pad_y = int(actual_fs * 0.25)
-            box_rect = [lx - pad_x, current_y - pad_y, lx + lw + pad_x, current_y + lh + pad_y]
-            draw.rectangle(box_rect, fill=(15, 23, 42, 185))
-            draw.text((lx, current_y), line, font=font, fill=(255, 255, 255, 255))
-        elif subtitle_style == "yellow_outline":
-            outline_w = max(2, int(actual_fs * 0.12))
-            for dx in range(-outline_w, outline_w + 1):
-                for dy in range(-outline_w, outline_w + 1):
-                    if dx * dx + dy * dy <= outline_w * outline_w:
-                        draw.text((lx + dx, current_y + dy), line, font=font, fill=(0, 0, 0, 255))
-            draw.text((lx, current_y), line, font=font, fill=(255, 235, 59, 255))
-        else:  # outline
-            outline_w = max(2, int(actual_fs * 0.12))
-            for dx in range(-outline_w, outline_w + 1):
-                for dy in range(-outline_w, outline_w + 1):
-                    if dx * dx + dy * dy <= outline_w * outline_w:
-                        draw.text((lx + dx, current_y + dy), line, font=font, fill=(0, 0, 0, 255))
-            draw.text((lx, current_y), line, font=font, fill=(255, 255, 255, 255))
-
-        current_y += lh + line_spacing
-
-    img.convert("RGB").save(out_path, quality=90)
-    return out_path
+        return None
 
 
 def split_text_into_subtitle_cues(
