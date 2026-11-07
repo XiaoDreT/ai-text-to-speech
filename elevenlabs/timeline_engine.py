@@ -1639,6 +1639,131 @@ def get_video_duration_seconds(video_path: str) -> float:
     return 0.0
 
 
+def get_video_resolution(video_path: str) -> Tuple[int, int]:
+    """Mengambil lebar dan tinggi (width, height) dari video MP4."""
+    if not video_path or not os.path.exists(video_path):
+        return 1920, 1080
+    try:
+        # 1. Coba ffmpeg
+        res = subprocess.run(["ffmpeg", "-i", video_path], capture_output=True, text=True, timeout=10)
+        m = re.search(r",\s*(\d{3,4})x(\d{3,4})\b", res.stderr or "")
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    except Exception:
+        pass
+    try:
+        # 2. Coba gst-discoverer
+        res = subprocess.run(["gst-discoverer-1.0", video_path], capture_output=True, text=True, timeout=10)
+        m_w = re.search(r"Width:\s*(\d+)", res.stdout or "")
+        m_h = re.search(r"Height:\s*(\d+)", res.stdout or "")
+        if m_w and m_h:
+            return int(m_w.group(1)), int(m_h.group(1))
+    except Exception:
+        pass
+    return 1920, 1080
+
+
+def convert_srt_to_ass_file(
+    srt_path: str,
+    ass_path: str,
+    video_w: int = 1920,
+    video_h: int = 1080,
+    subtitle_style: str = "outline",
+    font_size: int = 13,
+    ypad: int = 12,
+) -> bool:
+    """
+    Mengonversi file subtitle .SRT menjadi file .ASS dengan resolusi kanvas presisi (PlayResX, PlayResY).
+    Hal ini memastikan rendering font subtitle di FFmpeg (libass) menghasilkan ketebalan outline yang halus
+    dan proporsional (persis seperti rendering Pango GStreamer di lokal), tanpa ketebalan outline hitam yang membengkak.
+    """
+    if not srt_path or not os.path.exists(srt_path):
+        return False
+
+    try:
+        with open(srt_path, "r", encoding="utf-8", errors="replace") as f:
+            srt_content = f.read()
+
+        scale_h = video_h / 1080.0
+        # Di GStreamer lokal, font_size 13 pt pada 1080p menghasilkan tinggi huruf ~26px.
+        scaled_fs = max(16, int(round(font_size * 2.0 * scale_h)))
+        scaled_ypad = max(12, int(round(ypad * 2.5 * scale_h)))
+
+        # Outline & shadow presisi: 1.0px outline halus anti-aliased (bukan 9.4px)
+        outline_val = round(max(0.8, 1.0 * scale_h), 1)
+        shadow_val = round(max(0.5, 0.8 * scale_h), 1)
+
+        font_name = "Liberation Sans"
+        if subtitle_style == "shaded_box":
+            border_style = 3
+            outline_val = round(max(1.5, 2.0 * scale_h), 1)
+            shadow_val = 0.0
+            primary_col = "&H00FFFFFF"
+            back_col = "&H99000000"
+            outline_col = "&H99000000"
+        elif subtitle_style == "yellow_outline":
+            border_style = 1
+            primary_col = "&H002BEBFF"
+            outline_col = "&H00000000"
+            back_col = "&H80000000"
+        else:  # "outline" (Standard clean YouTube/Netflix white text with subtle 1px border)
+            border_style = 1
+            primary_col = "&H00FFFFFF"
+            outline_col = "&H00000000"
+            back_col = "&H80000000"
+
+        ass_lines = [
+            "[Script Info]",
+            "ScriptType: v4.00+",
+            f"PlayResX: {video_w}",
+            f"PlayResY: {video_h}",
+            "ScaledBorderAndShadow: yes",
+            "",
+            "[V4+ Styles]",
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+            f"Style: Default,{font_name},{scaled_fs},{primary_col},&H000000FF,{outline_col},{back_col},-1,0,0,0,100,100,0,0,{border_style},{outline_val},{shadow_val},2,40,40,{scaled_ypad},1",
+            "",
+            "[Events]",
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+        ]
+
+        blocks = re.split(r"\n\s*\n", srt_content.strip())
+        for blk in blocks:
+            lines = [ln.strip() for ln in blk.strip().splitlines() if ln.strip()]
+            if len(lines) >= 2:
+                ts_idx = -1
+                for idx, ln in enumerate(lines):
+                    if "-->" in ln:
+                        ts_idx = idx
+                        break
+                if ts_idx >= 0 and ts_idx + 1 < len(lines):
+                    m = re.match(r"(\d+:\d+:\d+[,.]\d+)\s*-->\s*(\d+:\d+:\d+[,.]\d+)", lines[ts_idx])
+                    if m:
+                        def to_ass_t(t_str):
+                            t_str = t_str.replace(",", ".")
+                            p = t_str.split(":")
+                            h = int(p[0])
+                            m_str = p[1]
+                            s_p = p[2].split(".")
+                            s_str = s_p[0]
+                            cs_str = (s_p[1] if len(s_p) > 1 else "00")[:2].ljust(2, "0")
+                            return f"{h}:{m_str}:{s_str}.{cs_str}"
+
+                        start_ass = to_ass_t(m.group(1))
+                        end_ass = to_ass_t(m.group(2))
+                        text_content = r"\N".join(lines[ts_idx + 1:])
+                        text_content = text_content.replace("{", "\\{").replace("}", "\\}")
+                        ass_lines.append(f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{text_content}")
+
+        os.makedirs(os.path.dirname(os.path.abspath(ass_path)), exist_ok=True)
+        with open(ass_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(ass_lines))
+        return True
+    except Exception as e:
+        print(f"[convert_srt_to_ass_file] Gagal konversi: {e}")
+        return False
+
+
 def get_audio_duration_seconds(audio_path: str) -> float:
     """Mengambil total durasi audio (dalam detik) dari file MP3 / WAV."""
     if not audio_path or not os.path.exists(audio_path):
@@ -1835,19 +1960,9 @@ def generate_subtitle_preview_image(
                 draw.rectangle(box_rect, fill=(15, 23, 42, 185))
                 draw.text((lx, current_y), line, font=font, fill=(255, 255, 255, 255))
             elif subtitle_style == "yellow_outline":
-                outline_w = max(2, int(actual_fs * 0.12))
-                for dx in range(-outline_w, outline_w + 1):
-                    for dy in range(-outline_w, outline_w + 1):
-                        if dx * dx + dy * dy <= outline_w * outline_w:
-                            draw.text((lx + dx, current_y + dy), line, font=font, fill=(0, 0, 0, 255))
-                draw.text((lx, current_y), line, font=font, fill=(255, 235, 59, 255))
+                draw.text((lx, current_y), line, font=font, fill=(255, 235, 59, 255), stroke_width=1, stroke_fill=(0, 0, 0, 255))
             else:  # outline
-                outline_w = max(2, int(actual_fs * 0.12))
-                for dx in range(-outline_w, outline_w + 1):
-                    for dy in range(-outline_w, outline_w + 1):
-                        if dx * dx + dy * dy <= outline_w * outline_w:
-                            draw.text((lx + dx, current_y + dy), line, font=font, fill=(0, 0, 0, 255))
-                draw.text((lx, current_y), line, font=font, fill=(255, 255, 255, 255))
+                draw.text((lx, current_y), line, font=font, fill=(255, 255, 255, 255), stroke_width=1, stroke_fill=(0, 0, 0, 255))
 
             current_y += lh + line_spacing
 
@@ -2029,38 +2144,55 @@ def mux_audio_to_video(
 
         # A. Coba mux + burn-in subtitle via FFmpeg jika diaktifkan
         if burn_subtitles and subtitle_path and os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0:
+            temp_ass = None
             temp_srt = None
             try:
-                # Salin SRT ke file sementara di /tmp agar path bebas karakter aneh atau spasi
-                temp_srt = os.path.join(tempfile.gettempdir(), f"sub_{int(time.time()*1000)}.srt")
-                shutil.copy2(subtitle_path, temp_srt)
-                safe_srt_path = temp_srt.replace("\\", "/").replace(":", "\\:")
-
-                font_name = "Liberation Sans"
-                # ASS Alignment=2 (Bottom-Center), MarginV=ypad
-                if subtitle_style == "shaded_box":
-                    style_str = (
-                        f"FontName={font_name},FontSize={font_size},PrimaryColour=&H00FFFFFF&,"
-                        f"BackColour=&H99000000&,BorderStyle=3,Outline=2,Shadow=0,"
-                        f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
-                    )
-                elif subtitle_style == "yellow_outline":
-                    style_str = (
-                        f"FontName={font_name},FontSize={font_size},PrimaryColour=&H002BEBFF&,"
-                        f"OutlineColour=&H00000000&,BorderStyle=1,Outline=2.5,Shadow=1,"
-                        f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
-                    )
-                else:  # "outline" (Default YouTube / Netflix White Outline)
-                    style_str = (
-                        f"FontName={font_name},FontSize={font_size},PrimaryColour=&H00FFFFFF&,"
-                        f"OutlineColour=&H00000000&,BorderStyle=1,Outline=2.5,Shadow=1,"
-                        f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
-                    )
+                vid_w, vid_h = get_video_resolution(video_path)
+                temp_ass = os.path.join(tempfile.gettempdir(), f"sub_{int(time.time()*1000)}.ass")
+                converted = convert_srt_to_ass_file(
+                    srt_path=subtitle_path,
+                    ass_path=temp_ass,
+                    video_w=vid_w,
+                    video_h=vid_h,
+                    subtitle_style=subtitle_style,
+                    font_size=font_size,
+                    ypad=ypad,
+                )
 
                 vf_chain = []
                 if v_pad_sec > 0:
                     vf_chain.append(f"tpad=stop_mode=clone:stop_duration={v_pad_sec}")
-                vf_chain.append(f"subtitles={safe_srt_path}:force_style='{style_str}'")
+
+                if converted and os.path.exists(temp_ass) and os.path.getsize(temp_ass) > 0:
+                    safe_ass_path = temp_ass.replace("\\", "/").replace(":", "\\:")
+                    vf_chain.append(f"subtitles={safe_ass_path}")
+                else:
+                    # Fallback jika konversi ASS gagal: gunakan file SRT dengan force_style yang diperkecil secara tepat
+                    temp_srt = os.path.join(tempfile.gettempdir(), f"sub_{int(time.time()*1000)}.srt")
+                    shutil.copy2(subtitle_path, temp_srt)
+                    safe_srt_path = temp_srt.replace("\\", "/").replace(":", "\\:")
+                    font_name = "Liberation Sans"
+                    # Karena libass default 288p, pada 1080p scaling adalah 3.75x. Maka outline 0.35 * 3.75 ~ 1.3px (sangat halus)
+                    if subtitle_style == "shaded_box":
+                        style_str = (
+                            f"FontName={font_name},FontSize={font_size},PrimaryColour=&H00FFFFFF&,"
+                            f"BackColour=&H99000000&,BorderStyle=3,Outline=0.6,Shadow=0,"
+                            f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
+                        )
+                    elif subtitle_style == "yellow_outline":
+                        style_str = (
+                            f"FontName={font_name},FontSize={font_size},PrimaryColour=&H002BEBFF&,"
+                            f"OutlineColour=&H00000000&,BackColour=&H80000000&,Bold=-1,BorderStyle=1,Outline=0.35,Shadow=0.25,"
+                            f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
+                        )
+                    else:  # outline
+                        style_str = (
+                            f"FontName={font_name},FontSize={font_size},PrimaryColour=&H00FFFFFF&,"
+                            f"OutlineColour=&H00000000&,BackColour=&H80000000&,Bold=-1,BorderStyle=1,Outline=0.35,Shadow=0.25,"
+                            f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
+                        )
+                    vf_chain.append(f"subtitles={safe_srt_path}:force_style='{style_str}'")
+
                 vf_full = ",".join(vf_chain)
 
                 cmd_ff_sub = [
@@ -2095,6 +2227,11 @@ def mux_audio_to_video(
             except Exception as e:
                 print(f"[mux_audio_to_video] Exception saat FFmpeg subtitle burn: {e}")
             finally:
+                if temp_ass and os.path.exists(temp_ass):
+                    try:
+                        os.remove(temp_ass)
+                    except Exception:
+                        pass
                 if temp_srt and os.path.exists(temp_srt):
                     try:
                         os.remove(temp_srt)
