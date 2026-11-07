@@ -370,6 +370,7 @@ class ElevenLabsStudioClient:
         style: float = 0.0,
         speed: float = 1.0,
         use_speaker_boost: bool = True,
+        language_code: Optional[str] = None,
         previous_text: Optional[str] = None,
         next_text: Optional[str] = None,
         **kwargs,
@@ -388,10 +389,12 @@ class ElevenLabsStudioClient:
             speed=speed,
             use_speaker_boost=use_speaker_boost,
             output_format=output_format,
+            language_code=language_code,
             previous_text=previous_text,
             next_text=next_text,
             save_to_disk=False,
             with_timestamps=False,
+            **kwargs,
         )
         return res.get("raw_audio") or res.get("audio_bytes", b"")
 

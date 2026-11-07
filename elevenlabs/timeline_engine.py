@@ -1663,6 +1663,83 @@ def get_video_resolution(video_path: str) -> Tuple[int, int]:
     return 1920, 1080
 
 
+# ==========================================================
+# ELEVENLABS V4 AUDIO PROMPTS / EXPRESSION TAGS LIBRARY
+# ==========================================================
+ELEVEN_VOICE_TAGS = {
+    "Emotion": [
+        "[cheerful]", "[excited]", "[happy]", "[confident]", "[curious]",
+        "[playful]", "[softly]", "[calm]", "[tired]", "[weak]",
+        "[angry]", "[bored]", "[menacing]", "[sad]", "[nervous]"
+    ],
+    "Vocalizations": [
+        "[clears throat]", "[coughing]", "[chuckling]", "[sighing]",
+        "[sniffling]", "[yawning]", "[laughing]", "[sharp exhale]",
+        "[scoffing]", "[humming]", "[panting]", "[gasping]"
+    ],
+    "Delivery": [
+        "[whispering]", "[slowly]", "[fast]", "[softly]",
+        "[singing]", "[voice-breaking]", "[pause]", "[dramatic]", "[solemnly]"
+    ],
+}
+
+
+def auto_tag_text(text: str) -> str:
+    """
+    Menganalisis teks narasi dan menyematkan tag ekspresi audio cue (fitur unggulan Eleven v4)
+    secara kontekstual dan natural (misalnya [cheerful], [confident], [excited], [curious], dll.).
+    Jika teks sudah memiliki tag ekspresi, tag yang ada dipertahankan tanpa diduplikasi.
+    """
+    clean = (text or "").strip()
+    if not clean:
+        return clean
+
+    # Jika sudah ada tag kurung siku, jangan duplikasi
+    if re.search(r"\[[a-zA-Z\s_-]+\]", clean):
+        return clean
+
+    lower = clean.lower()
+
+    # 1. Salam pembuka / Welcoming
+    if any(k in lower for k in ["selamat datang", "halo", "hai", "hello", "welcome", "salam", "pagi", "siang", "sore", "malam", "你好"]):
+        return f"[cheerful] {clean}"
+
+    # 2. Pertanyaan / Rasa ingin tahu
+    if clean.endswith("?") or any(k in lower for k in ["apakah", "bagaimana", "mengapa", "kenapa", "sudahkah", "tahukah kamu", "bisa"]):
+        return f"[curious] {clean}"
+
+    # 3. Antusias / Kalimat seru / Keunggulan
+    if clean.endswith("!") or any(k in lower for k in ["hebat", "luar biasa", "keren", "mantap", "sempurna", "mudah sekali", "sangat cepat", "wow"]):
+        return f"[excited] {clean}"
+
+    # 4. Berhasil / Penutup / Kepuasan
+    if any(k in lower for k in ["berhasil", "selesai", "sukses", "tersimpan", "akhirnya", "tuntas", "selamat"]):
+        return f"[cheerful] {clean}"
+
+    # 5. Instruksi / Tutorial langsung / Panduan
+    if any(k in lower for k in ["buka menu", "klik tombol", "pilih opsi", "isi formulir", "masukkan", "tekan tombol", "centang", "arahkan"]):
+        return f"[confident] {clean}"
+
+    # 6. Peringatan / Hati-hati / Teliti
+    if any(k in lower for k in ["perhatian", "penting", "hati-hati", "jangan", "pastikan", "catatan"]):
+        return f"[slowly] {clean}"
+
+    # 7. Penjelasan detail / Tenang
+    if any(k in lower for k in ["selanjutnya", "berikutnya", "kemudian", "lalu", "pada halaman ini"]):
+        return f"[softly] {clean}"
+
+    # Default natural tutorial delivery
+    return f"[confident] {clean}"
+
+
+def strip_expression_tags(text: str) -> str:
+    """Menghapus seluruh tag ekspresi audio [tag] dari teks agar subtitle bersih."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"\[[a-zA-Z\s_-]+\]", "", text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def convert_srt_to_ass_file(
     srt_path: str,
     ass_path: str,
@@ -1674,8 +1751,9 @@ def convert_srt_to_ass_file(
 ) -> bool:
     """
     Mengonversi file subtitle .SRT menjadi file .ASS dengan resolusi kanvas presisi (PlayResX, PlayResY).
-    Hal ini memastikan rendering font subtitle di FFmpeg (libass) menghasilkan ketebalan outline yang halus
-    dan proporsional (persis seperti rendering Pango GStreamer di lokal), tanpa ketebalan outline hitam yang membengkak.
+    Hal ini memastikan rendering font subtitle di FFmpeg (libass) menghasilkan proporsi ukuran teks
+    dan ketebalan outline yang halus dan proporsional (persis seperti rendering Pango GStreamer di lokal),
+    tanpa ketebalan outline hitam yang membengkak atau teks yang kekecilan.
     """
     if not srt_path or not os.path.exists(srt_path):
         return False
@@ -1685,18 +1763,20 @@ def convert_srt_to_ass_file(
             srt_content = f.read()
 
         scale_h = video_h / 1080.0
-        # Di GStreamer lokal, font_size 13 pt pada 1080p menghasilkan tinggi huruf ~26px.
-        scaled_fs = max(16, int(round(font_size * 2.0 * scale_h)))
-        scaled_ypad = max(12, int(round(ypad * 2.5 * scale_h)))
+        # Proporsi presisi 100% sinkron antara video final (1080p) dan pratinjau gambar:
+        # Pada 1080p, font_size=13 menghasilkan tinggi font 52px (sekitar 66% lebar layar),
+        # persis seperti tampilan di lokal dan pratinjau Streamlit.
+        scaled_fs = max(24, int(round(font_size * 4.0 * scale_h)))
+        scaled_ypad = max(20, int(round(ypad * 3.5 * scale_h)))
 
-        # Outline & shadow presisi: 1.0px outline halus anti-aliased (bukan 9.4px)
-        outline_val = round(max(0.8, 1.0 * scale_h), 1)
-        shadow_val = round(max(0.5, 0.8 * scale_h), 1)
+        # Outline & shadow presisi: 1.8px outline halus anti-aliased (bukan 9.4px)
+        outline_val = round(max(1.2, 1.8 * scale_h), 1)
+        shadow_val = round(max(0.6, 1.2 * scale_h), 1)
 
         font_name = "Liberation Sans"
         if subtitle_style == "shaded_box":
             border_style = 3
-            outline_val = round(max(1.5, 2.0 * scale_h), 1)
+            outline_val = round(max(2.0, 3.5 * scale_h), 1)
             shadow_val = 0.0
             primary_col = "&H00FFFFFF"
             back_col = "&H99000000"
@@ -1706,7 +1786,7 @@ def convert_srt_to_ass_file(
             primary_col = "&H002BEBFF"
             outline_col = "&H00000000"
             back_col = "&H80000000"
-        else:  # "outline" (Standard clean YouTube/Netflix white text with subtle 1px border)
+        else:  # "outline" (Standard clean YouTube/Netflix white text with subtle 1.8px border)
             border_style = 1
             primary_col = "&H00FFFFFF"
             outline_col = "&H00000000"
@@ -1751,9 +1831,13 @@ def convert_srt_to_ass_file(
 
                         start_ass = to_ass_t(m.group(1))
                         end_ass = to_ass_t(m.group(2))
-                        text_content = r"\N".join(lines[ts_idx + 1:])
-                        text_content = text_content.replace("{", "\\{").replace("}", "\\}")
-                        ass_lines.append(f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{text_content}")
+                        # Bersihkan tag ekspresi audio cue (seperti [cheerful], [excited]) dari subtitle
+                        raw_sub_text = [strip_expression_tags(l) for l in lines[ts_idx + 1:]]
+                        raw_sub_text = [l for l in raw_sub_text if l]
+                        text_content = r"\N".join(raw_sub_text) if raw_sub_text else ""
+                        if text_content:
+                            text_content = text_content.replace("{", "\\{").replace("}", "\\}")
+                            ass_lines.append(f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{text_content}")
 
         os.makedirs(os.path.dirname(os.path.abspath(ass_path)), exist_ok=True)
         with open(ass_path, "w", encoding="utf-8") as f:
@@ -1921,9 +2005,11 @@ def generate_subtitle_preview_image(
             img = Image.new("RGB", (output_width, h_canvas), color=(26, 32, 44))
 
         w, h = img.size
-        scale = w / 720.0
-        actual_fs = max(11, int(round(font_size * scale * 1.15)))
-        actual_ypad = max(6, int(round(ypad * scale)))
+        # Proporsi presisi 100% sinkron dengan video 1080p:
+        # Pada w=720 (405p), actual_fs = 20px (untuk font_size 13), yang setara persis dengan 52px pada 1080p (~66% lebar layar).
+        actual_fs = max(12, int(round(font_size * 4.0 * (w / 1920.0))))
+        actual_ypad = max(8, int(round(ypad * 3.5 * (h / 1080.0))))
+        stroke_w = max(1, int(round(1.8 * (w / 1920.0))))
 
         font_path = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
         if not os.path.exists(font_path):
@@ -1933,11 +2019,14 @@ def generate_subtitle_preview_image(
         except Exception:
             font = ImageFont.load_default()
 
+        # Bersihkan tag ekspresi audio cue [tag] agar tidak muncul di pratinjau teks subtitle
+        sub_preview_text = strip_expression_tags(clean_text) or clean_text
+
         draw = ImageDraw.Draw(img, "RGBA")
-        max_text_width = int(w * 0.82)
-        avg_char_w = max(6.0, actual_fs * 0.55)
-        chars_per_line = max(20, int(max_text_width / avg_char_w))
-        wrapped_lines = textwrap.wrap(clean_text, width=chars_per_line) or [clean_text]
+        max_text_width = int(w * 0.84)
+        avg_char_w = max(7.0, actual_fs * 0.52)
+        chars_per_line = max(24, int(max_text_width / avg_char_w))
+        wrapped_lines = textwrap.wrap(sub_preview_text, width=chars_per_line) or [sub_preview_text]
 
         line_bboxes = [draw.textbbox((0, 0), line, font=font) for line in wrapped_lines]
         line_heights = [(bb[3] - bb[1]) for bb in line_bboxes]
@@ -1954,15 +2043,15 @@ def generate_subtitle_preview_image(
             lx = (w - lw) // 2
 
             if subtitle_style == "shaded_box":
-                pad_x = int(actual_fs * 0.6)
-                pad_y = int(actual_fs * 0.25)
+                pad_x = int(actual_fs * 0.5)
+                pad_y = int(actual_fs * 0.2)
                 box_rect = [lx - pad_x, current_y - pad_y, lx + lw + pad_x, current_y + lh + pad_y]
-                draw.rectangle(box_rect, fill=(15, 23, 42, 185))
+                draw.rectangle(box_rect, fill=(15, 23, 42, 190))
                 draw.text((lx, current_y), line, font=font, fill=(255, 255, 255, 255))
             elif subtitle_style == "yellow_outline":
-                draw.text((lx, current_y), line, font=font, fill=(255, 235, 59, 255), stroke_width=1, stroke_fill=(0, 0, 0, 255))
+                draw.text((lx, current_y), line, font=font, fill=(255, 235, 59, 255), stroke_width=stroke_w, stroke_fill=(0, 0, 0, 255))
             else:  # outline
-                draw.text((lx, current_y), line, font=font, fill=(255, 255, 255, 255), stroke_width=1, stroke_fill=(0, 0, 0, 255))
+                draw.text((lx, current_y), line, font=font, fill=(255, 255, 255, 255), stroke_width=stroke_w, stroke_fill=(0, 0, 0, 255))
 
             current_y += lh + line_spacing
 
@@ -1990,8 +2079,14 @@ def split_text_into_subtitle_cues(
     2. Cue terakhir diberikan reading-linger nyaman (1.8s - 3.0s) jika terdapat jeda hening setelahnya.
     3. Batas akhir cue otomatis dijaga agar tidak bertabrakan (overlap) dengan segmen berikutnya.
     4. Mencegah subtitle terpotong sebelum kalimat selesai diucapkan.
+    5. Otomatis membersihkan tag audio [tag] agar subtitle bersih.
     """
     text = (text or "").strip()
+    if not text:
+        return []
+
+    # Hapus tag ekspresi audio cue (seperti [cheerful], [excited]) agar tidak muncul di teks subtitle
+    text = strip_expression_tags(text)
     if not text:
         return []
 
@@ -2172,23 +2267,23 @@ def mux_audio_to_video(
                     shutil.copy2(subtitle_path, temp_srt)
                     safe_srt_path = temp_srt.replace("\\", "/").replace(":", "\\:")
                     font_name = "Liberation Sans"
-                    # Karena libass default 288p, pada 1080p scaling adalah 3.75x. Maka outline 0.35 * 3.75 ~ 1.3px (sangat halus)
+                    # Karena libass default 288p, pada 1080p scaling adalah 3.75x. Maka outline 0.48 * 3.75 ~ 1.8px (sangat halus)
                     if subtitle_style == "shaded_box":
                         style_str = (
                             f"FontName={font_name},FontSize={font_size},PrimaryColour=&H00FFFFFF&,"
-                            f"BackColour=&H99000000&,BorderStyle=3,Outline=0.6,Shadow=0,"
+                            f"BackColour=&H99000000&,BorderStyle=3,Outline=0.8,Shadow=0,"
                             f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
                         )
                     elif subtitle_style == "yellow_outline":
                         style_str = (
                             f"FontName={font_name},FontSize={font_size},PrimaryColour=&H002BEBFF&,"
-                            f"OutlineColour=&H00000000&,BackColour=&H80000000&,Bold=-1,BorderStyle=1,Outline=0.35,Shadow=0.25,"
+                            f"OutlineColour=&H00000000&,BackColour=&H80000000&,Bold=-1,BorderStyle=1,Outline=0.48,Shadow=0.32,"
                             f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
                         )
                     else:  # outline
                         style_str = (
                             f"FontName={font_name},FontSize={font_size},PrimaryColour=&H00FFFFFF&,"
-                            f"OutlineColour=&H00000000&,BackColour=&H80000000&,Bold=-1,BorderStyle=1,Outline=0.35,Shadow=0.25,"
+                            f"OutlineColour=&H00000000&,BackColour=&H80000000&,Bold=-1,BorderStyle=1,Outline=0.48,Shadow=0.32,"
                             f"Alignment=2,MarginV={ypad},MarginL=30,MarginR=30"
                         )
                     vf_chain.append(f"subtitles={safe_srt_path}:force_style='{style_str}'")
@@ -2355,6 +2450,7 @@ def generate_timeline_voiceover(
     segments: List[Dict[str, Any]],
     voice_id: str = ZEN_PRIMARY_VOICE_ID,
     model_id: str = "eleven_v4",
+    language_code: Optional[str] = None,
     stability: float = 0.55,
     similarity_boost: float = 0.80,
     style: float = 0.0,
@@ -2375,6 +2471,7 @@ def generate_timeline_voiceover(
     """
     Menghasilkan audio Voice Over terpadu yang menempatkan setiap segmen teks
     tepat pada rentang detik yang ditentukan oleh pengguna (HH:MM:SS - HH:MM:SS).
+    Mendukung pemilihan bahasa multinasional (language_code) dan ekspresi vokal Eleven v4.
     """
     valid_rows = [row for row in segments if (row.get("text") or "").strip()]
     if not valid_rows:
@@ -2435,6 +2532,7 @@ def generate_timeline_voiceover(
                 text=item["text"],
                 voice_id=voice_id,
                 model_id=model_id,
+                language_code=language_code,
                 output_format="pcm_24000",
                 stability=stability,
                 similarity_boost=similarity_boost,
@@ -2449,6 +2547,7 @@ def generate_timeline_voiceover(
                 text=item["text"],
                 voice_id=voice_id,
                 model_id=model_id,
+                language_code=language_code,
                 output_format="pcm_24000",
                 stability=stability,
                 similarity_boost=similarity_boost,
