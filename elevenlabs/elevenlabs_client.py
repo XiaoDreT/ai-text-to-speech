@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Generator, Any
 import requests
 
-DEFAULT_API_KEY = "sk_c0a8c6bce666d7cc8eba36cf180e564f7087b0da9e9be3a3"
+DEFAULT_API_KEY = "sk_abae4b3e6284e51778781a7cce418e508418115f61bc5269"
 BASE_URL = "https://api.elevenlabs.io/v1"
 
 # ID Suara Custom (Cloned) milik pengguna di Workspace ElevenLabs
