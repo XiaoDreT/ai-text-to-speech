@@ -2215,8 +2215,9 @@ def mux_audio_to_video(
 
                 cmd_ff_sub.extend([
                     "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-crf", "22",
+                    "-preset", "ultrafast",
+                    "-threads", "1",
+                    "-crf", "23",
                     "-c:a", "aac",
                     "-b:a", "192k",
                     "-map", "0:v:0",
@@ -2258,8 +2259,9 @@ def mux_audio_to_video(
                 cmd_ff_fast.extend([
                     "-vf", f"tpad=stop_mode=clone:stop_duration={v_pad_sec}",
                     "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-crf", "22",
+                    "-preset", "ultrafast",
+                    "-threads", "1",
+                    "-crf", "23",
                 ])
             else:
                 cmd_ff_fast.extend(["-c:v", "copy"])
