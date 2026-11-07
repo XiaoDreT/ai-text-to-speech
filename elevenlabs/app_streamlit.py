@@ -113,7 +113,7 @@ def format_voice_label(v: dict) -> str:
     lang = (labels.get("language") or "").upper()
     accent = labels.get("accent") or ""
 
-    if cat == "cloned":
+    if vid == ZEN_PRIMARY_VOICE_ID or name.strip().lower() == "zen" or cat == "cloned":
         badge = "🌟 [CLONED - SUARA SAYA]"
     elif cat == "professional":
         badge = "🎙️ [PRO WORKSPACE]"
@@ -192,11 +192,19 @@ with st.sidebar:
         filtered_voices = voices_list
 
     voice_options_map = {format_voice_label(v): v for v in filtered_voices}
+
+    # Otomatis pilih suara Zen (3OAL9h0y2edOwGJbMU4X) sebagai default terpilih
+    default_voice_idx = 0
+    for idx_v, (lbl, v_obj) in enumerate(voice_options_map.items()):
+        if v_obj.get("voice_id") == ZEN_PRIMARY_VOICE_ID or v_obj.get("name", "").strip().lower() == "zen":
+            default_voice_idx = idx_v
+            break
+
     selected_voice_label = st.selectbox(
         "Pilih Suara (Voice)",
         options=list(voice_options_map.keys()),
-        index=0,
-        help="Suara hasil kloning Anda ('Zen') ditempatkan di urutan paling atas.",
+        index=default_voice_idx,
+        help="Suara hasil kloning Anda ('Zen') ditempatkan di urutan paling atas dan otomatis menjadi default voice over.",
     )
     selected_voice = voice_options_map[selected_voice_label]
     selected_voice_id = selected_voice["voice_id"]
@@ -1229,9 +1237,9 @@ with tab_dialog:
     )
 
     if "dialog_lines" not in st.session_state:
-        second_vid = ZEN_SECONDARY_VOICE_ID
+        second_vid = "pNInz6obpgDQGcFmaJgB"
         for v in voices_list:
-            if v["voice_id"] not in (ZEN_PRIMARY_VOICE_ID, ZEN_SECONDARY_VOICE_ID) and (v.get("labels") or {}).get("language") == "id":
+            if v["voice_id"] != ZEN_PRIMARY_VOICE_ID and v.get("name", "").strip().lower() != "zen":
                 second_vid = v["voice_id"]
                 break
 

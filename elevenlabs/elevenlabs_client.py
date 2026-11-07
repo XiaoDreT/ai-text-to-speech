@@ -22,8 +22,8 @@ DEFAULT_API_KEY = "sk_abae4b3e6284e51778781a7cce418e508418115f61bc5269"
 BASE_URL = "https://api.elevenlabs.io/v1"
 
 # ID Suara Custom (Cloned) milik pengguna di Workspace ElevenLabs
-ZEN_PRIMARY_VOICE_ID = "iQtQk8f90iEZq2GQ3DRy"
-ZEN_SECONDARY_VOICE_ID = "vsEuk9M8GW3PkATRO5dG"
+ZEN_PRIMARY_VOICE_ID = "3OAL9h0y2edOwGJbMU4X"
+ZEN_SECONDARY_VOICE_ID = "3OAL9h0y2edOwGJbMU4X"
 
 # Format output yang didukung ElevenLabs
 OUTPUT_FORMATS = {
@@ -194,7 +194,7 @@ class ElevenLabsStudioClient:
             lang = labels.get("language", "")
 
             # Prioritas 0: Suara Cloned milik pengguna (Zen)
-            if vid == ZEN_PRIMARY_VOICE_ID:
+            if vid == ZEN_PRIMARY_VOICE_ID or v.get("name", "").strip().lower() == "zen":
                 cat_rank = 0
             elif cat == "cloned":
                 cat_rank = 1
