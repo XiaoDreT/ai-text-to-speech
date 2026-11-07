@@ -14,6 +14,7 @@ import io
 import re
 import html
 import json
+import inspect
 from datetime import datetime
 import streamlit as st
 
@@ -55,6 +56,25 @@ st.set_page_config(
     page_icon="🎙️",
     layout="wide",
 )
+
+
+def _get_stretch_kwargs() -> dict:
+    """
+    Kompatibilitas parameter lebar elemen Streamlit (transisi use_container_width -> width):
+    - Streamlit >= 1.40 (2026+): menggunakan width='stretch'
+    - Streamlit < 1.40: menggunakan use_container_width=True
+    Mencegah peringatan log spam 'use_container_width will be removed after 2025-12-31'.
+    """
+    try:
+        sig = inspect.signature(st.button)
+        if "width" in sig.parameters:
+            return {"width": "stretch"}
+    except Exception:
+        pass
+    return {"use_container_width": True}
+
+
+ST_STRETCH = _get_stretch_kwargs()
 
 MODEL_DESCRIPTIONS = {
     "eleven_multilingual_v2": "Eleven Multilingual v2 — Paling ekspresif & natural untuk Bahasa Indonesia (Rekomendasi Utama)",
@@ -130,7 +150,7 @@ with st.sidebar:
     # API Key dibaca secara privat dari Environment Variable atau konfigurasi backend (tidak diekspos ke UI)
     api_key = os.getenv("ELEVENLABS_API_KEY", DEFAULT_API_KEY)
 
-    if st.button("🔄 Refresh Suara Workspace", use_container_width=True):
+    if st.button("🔄 Refresh Suara Workspace", **ST_STRETCH):
         fetch_workspace_voices.clear()
         fetch_available_models.clear()
         st.rerun()
@@ -343,12 +363,12 @@ with tab_timeline:
         st.markdown("**1. Preset & Format Tabel:**")
         p_btn1, p_btn2 = st.columns(2)
         with p_btn1:
-            if st.button("💳 Naskah Payment (Dokumen)", use_container_width=True, help="Muat 6 segmen dari naskah dokumen Payment Method"):
+            if st.button("💳 Naskah Payment (Dokumen)", **ST_STRETCH, help="Muat 6 segmen dari naskah dokumen Payment Method"):
                 set_storyboard_segments(PAYMENT_METHOD_SEGMENTS)
                 st.session_state.feature_name = "Payment_Method"
                 st.rerun()
         with p_btn2:
-            if st.button("📹 Naskah Synced Video (41s)", use_container_width=True, help="Muat 6 segmen yang disesuaikan presisi dengan video acuan (41 detik) dan langsung aktifkan video"):
+            if st.button("📹 Naskah Synced Video (41s)", **ST_STRETCH, help="Muat 6 segmen yang disesuaikan presisi dengan video acuan (41 detik) dan langsung aktifkan video"):
                 set_storyboard_segments(PAYMENT_METHOD_VIDEO_SYNCED_SEGMENTS)
                 st.session_state.feature_name = "Payment_Method"
                 if os.path.exists(REFERENCE_PAYMENT_METHOD_VIDEO_PATH):
@@ -360,12 +380,12 @@ with tab_timeline:
 
         p_btn3, p_btn4 = st.columns(2)
         with p_btn3:
-            if st.button("📄 Naskah Component", use_container_width=True, help="Muat 6 segmen dari PDF Tutorial Flow Cetakia"):
+            if st.button("📄 Naskah Component", **ST_STRETCH, help="Muat 6 segmen dari PDF Tutorial Flow Cetakia"):
                 set_storyboard_segments(CETAKIA_DEFAULT_SEGMENTS)
                 st.session_state.feature_name = "Component"
                 st.rerun()
         with p_btn4:
-            if st.button("🕒 Rapikan Waktu Berurutan", use_container_width=True, help="Tata ulang seluruh rentang waktu agar berurutan mulai 00:00:00 (berguna setelah memindah posisi baris)"):
+            if st.button("🕒 Rapikan Waktu Berurutan", **ST_STRETCH, help="Tata ulang seluruh rentang waktu agar berurutan mulai 00:00:00 (berguna setelah memindah posisi baris)"):
                 reseq = resequence_timeline_timestamps(st.session_state.timeline_segments)
                 set_storyboard_segments(reseq)
                 st.toast("✓ Seluruh rentang waktu telah dirapikan berurutan!", icon="🕒")
@@ -373,12 +393,12 @@ with tab_timeline:
 
         p_btn5, p_btn6 = st.columns(2)
         with p_btn5:
-            if st.button("🕒 Standarkan HH:MM:SS", use_container_width=True, help="Ubah semua baris durasi ke format wajib HH:MM:SS - HH:MM:SS"):
+            if st.button("🕒 Standarkan HH:MM:SS", **ST_STRETCH, help="Ubah semua baris durasi ke format wajib HH:MM:SS - HH:MM:SS"):
                 set_storyboard_segments(st.session_state.timeline_segments)
                 st.toast("✓ Seluruh rentang waktu telah distandarkan ke format HH:MM:SS - HH:MM:SS!", icon="🕒")
                 st.rerun()
         with p_btn6:
-            if st.button("🧹 Reset (1 Baris)", use_container_width=True):
+            if st.button("🧹 Reset (1 Baris)", **ST_STRETCH):
                 set_storyboard_segments([
                     {
                         "time_range": "00:00:00 - 00:00:05",
@@ -404,7 +424,7 @@ with tab_timeline:
             auto_apply = st.session_state.get("last_uploaded_storyboard_sig") != file_sig
             reapply_clicked = st.button(
                 f"📥 Terapkan File '{uploaded_storyboard.name}' ke Tabel Storyboard",
-                use_container_width=True,
+                **ST_STRETCH,
             )
 
             if auto_apply or reapply_clicked:
@@ -451,7 +471,12 @@ with tab_timeline:
             help="Teks naskah dari tabel storyboard otomatis dibakar/ditampilkan di safe margin bagian bawah tengah video (center) sebagai komponen pendukung yang tidak menutupi visual penting video.",
         )
         if burn_subtitles_flag:
-            with st.popover("🎨 Pengaturan & Pratinjau Subtitle Video", use_container_width=True):
+            if hasattr(st, "popover"):
+                sub_ctx = st.popover("🎨 Pengaturan & Pratinjau Subtitle Video", **ST_STRETCH)
+            else:
+                sub_ctx = st.expander("🎨 Pengaturan & Pratinjau Subtitle Video", expanded=False)
+
+            with sub_ctx:
                 st.caption(
                     "💡 **Komponen Pendukung**: Subtitle otomatis dipecah menjadi 1 baris kalimat ringkas "
                     "dan ditempatkan tepat di margin bawah agar tidak menutupi form modal atau tombol video."
@@ -520,7 +545,7 @@ with tab_timeline:
                     st.image(
                         prev_img_p,
                         caption=f"Gaya: {sub_style_choice} | Ukuran: {sub_font_size}pt | Margin Bawah: {sub_ypad}px",
-                        use_container_width=True,
+                        **ST_STRETCH,
                     )
         else:
             sub_style_choice = "outline"
@@ -545,7 +570,7 @@ with tab_timeline:
                 st.image(
                     prev_img_p,
                     caption=f"Pratinjau Subtitle pada Frame Video: {sub_style_choice} ({sub_font_size}pt, ypad {sub_ypad}px)",
-                    use_container_width=True,
+                    **ST_STRETCH,
                 )
 
     # ==========================================================
@@ -563,7 +588,7 @@ with tab_timeline:
             )
             v_btn1, v_btn2 = st.columns(2)
             with v_btn1:
-                if st.button("🎬 Gunakan Video Referensi Payment Method (41s)", use_container_width=True):
+                if st.button("🎬 Gunakan Video Referensi Payment Method (41s)", **ST_STRETCH):
                     if os.path.exists(REFERENCE_PAYMENT_METHOD_VIDEO_PATH):
                         st.session_state.active_video_path = REFERENCE_PAYMENT_METHOD_VIDEO_PATH
                         st.session_state.active_video_name = "Payment_Method_Tutorial.mp4"
@@ -573,7 +598,7 @@ with tab_timeline:
                         st.rerun()
             with v_btn2:
                 if st.session_state.get("active_video_path"):
-                    if st.button("❌ Lepas Video Acuan", use_container_width=True):
+                    if st.button("❌ Lepas Video Acuan", **ST_STRETCH):
                         st.session_state.active_video_path = None
                         st.session_state.active_video_name = None
                         st.session_state.active_video_duration = 0.0
@@ -640,7 +665,7 @@ with tab_timeline:
                 # Stream file MP4 langsung via HTTP range requests (sangat hemat memori RAM)
                 st.video(video_source_to_play, start_time=cur_seek)
                 if cur_seek > 0:
-                    if st.button("⏮️ Putar Ulang dari Awal (00:00:00)", key="btn_reset_seek", use_container_width=True):
+                    if st.button("⏮️ Putar Ulang dari Awal (00:00:00)", key="btn_reset_seek", **ST_STRETCH):
                         st.session_state.video_seek_time = 0
                         st.rerun()
             else:
@@ -786,14 +811,14 @@ with tab_timeline:
                 # Ekstrak thumbnail dengan disk caching persisten (sangat cepat & hemat CPU)
                 thumb_path = extract_video_thumbnail(active_vpath, s_val, output_size=260)
                 if thumb_path and os.path.exists(thumb_path):
-                    st.image(thumb_path, caption=f"🎬 Cuplikan Adegan @ {s_val}", use_container_width=True)
+                    st.image(thumb_path, caption=f"🎬 Cuplikan Adegan @ {s_val}", **ST_STRETCH)
 
                 # Tombol navigasi adegan ke pemutar video utama (menghindari duplikasi video player berat di DOM browser)
                 if st.button(
                     f"🎯 Pratinjau di Video Utama ({s_val})",
                     key=f"seek_btn_{bver}_{idx}",
                     help=f"Lompatkan pemutar video utama ke adegan detik {s_val}",
-                    use_container_width=True,
+                    **ST_STRETCH,
                 ):
                     st.session_state.video_seek_time = int(cur_s_sec)
                     st.rerun()
@@ -841,7 +866,7 @@ with tab_timeline:
                 "🗑️",
                 key=f"tl_del_{bver}_{idx}",
                 help="Hapus segmen waktu ini",
-                use_container_width=True,
+                **ST_STRETCH,
             )
 
         if up_clicked:
@@ -881,7 +906,7 @@ with tab_timeline:
     # Tombol Tambah Segmen & Tombol Generate Utama
     act_c1, act_c2 = st.columns([1.2, 2.8])
     with act_c1:
-        if st.button("➕ Tambah Baris Segmen Waktu (HH:MM:SS)", use_container_width=True):
+        if st.button("➕ Tambah Baris Segmen Waktu (HH:MM:SS)", **ST_STRETCH):
             if st.session_state.timeline_segments:
                 last_s, last_e = parse_time_range_str(st.session_state.timeline_segments[-1]["time_range"])
                 next_s = last_e + 1.0
@@ -902,7 +927,7 @@ with tab_timeline:
         gen_timeline_btn = st.button(
             f"🚀 Generate Timeline Voice Over ({len(st.session_state.timeline_segments)} Segmen — Suara '{selected_voice.get('name')}')",
             type="primary",
-            use_container_width=True,
+            **ST_STRETCH,
         )
 
     # Eksekusi Pembuatan Audio Timeline
@@ -1078,7 +1103,7 @@ with tab_timeline:
                     file_name=clean_name,
                     mime=target_mime,
                     type="primary",
-                    use_container_width=True,
+                    **ST_STRETCH,
                 )
 
         st.markdown("#### 📊 Detail Penempatan Waktu & Durasi Tiap Segmen (`HH:MM:SS`)")
@@ -1094,7 +1119,7 @@ with tab_timeline:
                 "Kecepatan": f"{r['speed_multiplier']}x",
                 "Naskah Voice Over": r["text"],
             })
-        st.dataframe(report_rows, use_container_width=True, hide_index=True)
+        st.dataframe(report_rows, **ST_STRETCH, hide_index=True)
 
         col_sub1, col_sub2 = st.columns(2)
         with col_sub1:
@@ -1147,7 +1172,7 @@ with tab_single_tts:
             format_func=lambda fmt: OUTPUT_FORMATS.get(fmt, fmt),
         )
         with_timestamps_flag = st.checkbox("⏱️ Buat File Subtitle (.SRT) Otomatis", value=True)
-        generate_single_btn = st.button("🚀 Generate Suara (Single Track)", type="primary", use_container_width=True)
+        generate_single_btn = st.button("🚀 Generate Suara (Single Track)", type="primary", **ST_STRETCH)
 
     with col_right:
         st.subheader("🎧 Hasil Generasi Audio")
@@ -1182,7 +1207,7 @@ with tab_single_tts:
                 data=sres["audio_bytes"],
                 file_name=os.path.basename(sres["audio_path"]) if sres.get("audio_path") else f"tts.{sres['extension']}",
                 mime=sres["mime_type"],
-                use_container_width=True,
+                **ST_STRETCH,
             )
             if sres.get("srt_content"):
                 st.download_button(
@@ -1190,7 +1215,7 @@ with tab_single_tts:
                     data=sres["srt_content"].encode("utf-8"),
                     file_name=os.path.basename(sres["srt_path"]) if sres.get("srt_path") else "subtitle.srt",
                     mime="text/plain",
-                    use_container_width=True,
+                    **ST_STRETCH,
                 )
 
 # ==========================================================
@@ -1254,12 +1279,12 @@ with tab_dialog:
 
     btn_add_col, btn_gen_col = st.columns([1, 2])
     with btn_add_col:
-        if st.button("➕ Tambah Baris Dialog", use_container_width=True):
+        if st.button("➕ Tambah Baris Dialog", **ST_STRETCH):
             st.session_state.dialog_lines.append({"voice_id": selected_voice_id, "text": ""})
             st.rerun()
 
     with btn_gen_col:
-        gen_dialog_btn = st.button("🎬 Generate Percakapan Utuh (MP3)", type="primary", use_container_width=True)
+        gen_dialog_btn = st.button("🎬 Generate Percakapan Utuh (MP3)", type="primary", **ST_STRETCH)
 
     if gen_dialog_btn:
         valid_segments = [
@@ -1333,7 +1358,7 @@ with tab_history:
         st.subheader("📜 Riwayat Audio yang Dihasilkan (Tersimpan Lokal)")
         st.caption(f"Seluruh file audio dan subtitle otomatis disimpan di folder `{client.output_dir}`.")
     with col_h2:
-        if st.button("🗑️ Bersihkan Riwayat", use_container_width=True):
+        if st.button("🗑️ Bersihkan Riwayat", **ST_STRETCH):
             client.clear_local_history(delete_files=False)
             st.rerun()
 
