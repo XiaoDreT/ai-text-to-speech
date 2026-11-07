@@ -1683,6 +1683,44 @@ ELEVEN_VOICE_TAGS = {
     ],
 }
 
+ALL_EXPRESSION_CHOICES = [
+    "-- Pilih / Ketik untuk Cari Tag Ekspresi --",
+    "[cheerful] — Nada Ceria & Ramah (Salam / Greeting)",
+    "[excited] — Nada Antusias & Bersemangat (Poin Unggulan / Seruan)",
+    "[confident] — Nada Percaya Diri & Tegas (Instruksi Tutorial)",
+    "[curious] — Nada Bertanya & Ingin Tahu (Pertanyaan)",
+    "[playful] — Nada Santai & Menyenangkan",
+    "[softly] — Nada Lembut & Halus (Penjelasan Detail)",
+    "[calm] — Nada Tenang & Rileks",
+    "[tired] — Nada Lelah",
+    "[weak] — Nada Lemah",
+    "[angry] — Nada Marah / Kesal",
+    "[bored] — Nada Bosan",
+    "[menacing] — Nada Mengancam / Berat",
+    "[sad] — Nada Sedih",
+    "[nervous] — Nada Gugup",
+    "[clears throat] — Berdeham",
+    "[coughing] — Batuk",
+    "[chuckling] — Tertawa Kecil / Terkekeh",
+    "[sighing] — Menghela Nafas",
+    "[sniffling] — Tersedu",
+    "[yawning] — Menguap",
+    "[laughing] — Tertawa Lepas",
+    "[sharp exhale] — Hembusan Nafas Cepat",
+    "[scoffing] — Mencemooh",
+    "[humming] — Bersenandung",
+    "[panting] — Terengah-engah",
+    "[gasping] — Terkesiap / Kaget",
+    "[whispering] — Berbisik",
+    "[slowly] — Berbicara Lambat & Jelas (Peringatan/Detail)",
+    "[fast] — Berbicara Cepat",
+    "[pause] — Jeda Sejenak",
+    "[dramatic] — Nada Dramatis",
+    "[solemnly] — Nada Khidmat & Serius",
+    "[singing] — Bernyanyi",
+    "[voice-breaking] — Suara Bergetar / Emosional",
+]
+
 
 def auto_tag_text(text: str) -> str:
     """
