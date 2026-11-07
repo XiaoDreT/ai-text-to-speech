@@ -1663,121 +1663,6 @@ def get_video_resolution(video_path: str) -> Tuple[int, int]:
     return 1920, 1080
 
 
-# ==========================================================
-# ELEVENLABS V4 AUDIO PROMPTS / EXPRESSION TAGS LIBRARY
-# ==========================================================
-ELEVEN_VOICE_TAGS = {
-    "Emotion": [
-        "[cheerful]", "[excited]", "[happy]", "[confident]", "[curious]",
-        "[playful]", "[softly]", "[calm]", "[tired]", "[weak]",
-        "[angry]", "[bored]", "[menacing]", "[sad]", "[nervous]"
-    ],
-    "Vocalizations": [
-        "[clears throat]", "[coughing]", "[chuckling]", "[sighing]",
-        "[sniffling]", "[yawning]", "[laughing]", "[sharp exhale]",
-        "[scoffing]", "[humming]", "[panting]", "[gasping]"
-    ],
-    "Delivery": [
-        "[whispering]", "[slowly]", "[fast]", "[softly]",
-        "[singing]", "[voice-breaking]", "[pause]", "[dramatic]", "[solemnly]"
-    ],
-}
-
-ALL_EXPRESSION_CHOICES = [
-    "-- Pilih / Ketik untuk Cari Tag Ekspresi --",
-    "[cheerful] — Nada Ceria & Ramah (Salam / Greeting)",
-    "[excited] — Nada Antusias & Bersemangat (Poin Unggulan / Seruan)",
-    "[confident] — Nada Percaya Diri & Tegas (Instruksi Tutorial)",
-    "[curious] — Nada Bertanya & Ingin Tahu (Pertanyaan)",
-    "[playful] — Nada Santai & Menyenangkan",
-    "[softly] — Nada Lembut & Halus (Penjelasan Detail)",
-    "[calm] — Nada Tenang & Rileks",
-    "[tired] — Nada Lelah",
-    "[weak] — Nada Lemah",
-    "[angry] — Nada Marah / Kesal",
-    "[bored] — Nada Bosan",
-    "[menacing] — Nada Mengancam / Berat",
-    "[sad] — Nada Sedih",
-    "[nervous] — Nada Gugup",
-    "[clears throat] — Berdeham",
-    "[coughing] — Batuk",
-    "[chuckling] — Tertawa Kecil / Terkekeh",
-    "[sighing] — Menghela Nafas",
-    "[sniffling] — Tersedu",
-    "[yawning] — Menguap",
-    "[laughing] — Tertawa Lepas",
-    "[sharp exhale] — Hembusan Nafas Cepat",
-    "[scoffing] — Mencemooh",
-    "[humming] — Bersenandung",
-    "[panting] — Terengah-engah",
-    "[gasping] — Terkesiap / Kaget",
-    "[whispering] — Berbisik",
-    "[slowly] — Berbicara Lambat & Jelas (Peringatan/Detail)",
-    "[fast] — Berbicara Cepat",
-    "[pause] — Jeda Sejenak",
-    "[dramatic] — Nada Dramatis",
-    "[solemnly] — Nada Khidmat & Serius",
-    "[singing] — Bernyanyi",
-    "[voice-breaking] — Suara Bergetar / Emosional",
-]
-
-
-def auto_tag_text(text: str) -> str:
-    """
-    Menganalisis teks narasi dan menyematkan tag ekspresi audio cue (fitur unggulan Eleven v4)
-    secara kontekstual dan natural (misalnya [cheerful], [confident], [excited], [curious], dll.).
-    Jika teks sudah memiliki tag ekspresi, tag yang ada dipertahankan tanpa diduplikasi.
-    """
-    clean = (text or "").strip()
-    if not clean:
-        return clean
-
-    # Jika sudah ada tag kurung siku, jangan duplikasi
-    if re.search(r"\[[a-zA-Z\s_-]+\]", clean):
-        return clean
-
-    lower = clean.lower()
-
-    # 1. Salam pembuka / Welcoming
-    if any(k in lower for k in ["selamat datang", "halo", "hai", "hello", "welcome", "salam", "pagi", "siang", "sore", "malam", "你好"]):
-        return f"[cheerful] {clean}"
-
-    # 2. Pertanyaan / Rasa ingin tahu
-    if clean.endswith("?") or any(k in lower for k in ["apakah", "bagaimana", "mengapa", "kenapa", "sudahkah", "tahukah kamu", "bisa"]):
-        return f"[curious] {clean}"
-
-    # 3. Antusias / Kalimat seru / Keunggulan
-    if clean.endswith("!") or any(k in lower for k in ["hebat", "luar biasa", "keren", "mantap", "sempurna", "mudah sekali", "sangat cepat", "wow"]):
-        return f"[excited] {clean}"
-
-    # 4. Berhasil / Penutup / Kepuasan
-    if any(k in lower for k in ["berhasil", "selesai", "sukses", "tersimpan", "akhirnya", "tuntas", "selamat"]):
-        return f"[cheerful] {clean}"
-
-    # 5. Instruksi / Tutorial langsung / Panduan
-    if any(k in lower for k in ["buka menu", "klik tombol", "pilih opsi", "isi formulir", "masukkan", "tekan tombol", "centang", "arahkan"]):
-        return f"[confident] {clean}"
-
-    # 6. Peringatan / Hati-hati / Teliti
-    if any(k in lower for k in ["perhatian", "penting", "hati-hati", "jangan", "pastikan", "catatan"]):
-        return f"[slowly] {clean}"
-
-    # 7. Penjelasan detail / Tenang
-    if any(k in lower for k in ["selanjutnya", "berikutnya", "kemudian", "lalu", "pada halaman ini"]):
-        return f"[softly] {clean}"
-
-    # Default natural tutorial delivery
-    return f"[confident] {clean}"
-
-
-def strip_expression_tags(text: str) -> str:
-    """Menghapus seluruh tag ekspresi audio [tag] dari teks agar subtitle bersih."""
-    if not text:
-        return ""
-    cleaned = re.sub(r"\[[a-zA-Z\s_-]+\]", "", text)
-    return re.sub(r"\s+", " ", cleaned).strip()
-
-
 def convert_srt_to_ass_file(
     srt_path: str,
     ass_path: str,
@@ -1869,9 +1754,7 @@ def convert_srt_to_ass_file(
 
                         start_ass = to_ass_t(m.group(1))
                         end_ass = to_ass_t(m.group(2))
-                        # Bersihkan tag ekspresi audio cue (seperti [cheerful], [excited]) dari subtitle
-                        raw_sub_text = [strip_expression_tags(l) for l in lines[ts_idx + 1:]]
-                        raw_sub_text = [l for l in raw_sub_text if l]
+                        raw_sub_text = [l for l in lines[ts_idx + 1:] if l.strip()]
                         text_content = r"\N".join(raw_sub_text) if raw_sub_text else ""
                         if text_content:
                             text_content = text_content.replace("{", "\\{").replace("}", "\\}")
@@ -2057,8 +1940,7 @@ def generate_subtitle_preview_image(
         except Exception:
             font = ImageFont.load_default()
 
-        # Bersihkan tag ekspresi audio cue [tag] agar tidak muncul di pratinjau teks subtitle
-        sub_preview_text = strip_expression_tags(clean_text) or clean_text
+        sub_preview_text = clean_text
 
         draw = ImageDraw.Draw(img, "RGBA")
         max_text_width = int(w * 0.84)
@@ -2117,14 +1999,8 @@ def split_text_into_subtitle_cues(
     2. Cue terakhir diberikan reading-linger nyaman (1.8s - 3.0s) jika terdapat jeda hening setelahnya.
     3. Batas akhir cue otomatis dijaga agar tidak bertabrakan (overlap) dengan segmen berikutnya.
     4. Mencegah subtitle terpotong sebelum kalimat selesai diucapkan.
-    5. Otomatis membersihkan tag audio [tag] agar subtitle bersih.
     """
     text = (text or "").strip()
-    if not text:
-        return []
-
-    # Hapus tag ekspresi audio cue (seperti [cheerful], [excited]) agar tidak muncul di teks subtitle
-    text = strip_expression_tags(text)
     if not text:
         return []
 

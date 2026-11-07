@@ -45,10 +45,6 @@ from timeline_engine import (
     mux_audio_to_video,
     resequence_timeline_timestamps,
     generate_subtitle_preview_image,
-    ELEVEN_VOICE_TAGS,
-    ALL_EXPRESSION_CHOICES,
-    auto_tag_text,
-    strip_expression_tags,
 )
 
 # ==========================================================
@@ -392,28 +388,6 @@ with tab_timeline:
                 ])
                 st.rerun()
 
-        p_btn7, p_btn8 = st.columns(2)
-        with p_btn7:
-            if st.button("✨ Auto-tag Ekspresi (Eleven v4)", use_container_width=True, help="Rekomendasi model Eleven v4: otomatis menyematkan tag ekspresi ([cheerful], [confident], [excited], dll.) pada seluruh baris naskah"):
-                new_segs = []
-                for s in st.session_state.timeline_segments:
-                    sc = dict(s)
-                    sc["text"] = auto_tag_text(s.get("text", ""))
-                    new_segs.append(sc)
-                set_storyboard_segments(new_segs)
-                st.toast("✓ Seluruh naskah berhasil disematkan tag ekspresi Eleven v4!", icon="✨")
-                st.rerun()
-        with p_btn8:
-            if st.button("🧹 Hapus Tag Ekspresi", use_container_width=True, help="Hapus seluruh tag ekspresi ([...]) dari naskah"):
-                new_segs = []
-                for s in st.session_state.timeline_segments:
-                    sc = dict(s)
-                    sc["text"] = strip_expression_tags(s.get("text", ""))
-                    new_segs.append(sc)
-                set_storyboard_segments(new_segs)
-                st.toast("✓ Seluruh tag ekspresi telah dibersihkan.", icon="🧹")
-                st.rerun()
-
     with ctrl_col2:
         uploaded_storyboard = st.file_uploader(
             "📎 2. Upload File Naskah (.pdf, .docx, .doc, .odt, .rtf, .xlsx, .csv, .srt, .txt, .md)",
@@ -477,12 +451,7 @@ with tab_timeline:
             help="Teks naskah dari tabel storyboard otomatis dibakar/ditampilkan di safe margin bagian bawah tengah video (center) sebagai komponen pendukung yang tidak menutupi visual penting video.",
         )
         if burn_subtitles_flag:
-            if hasattr(st, "popover"):
-                sub_ctx = st.popover("🎨 Pengaturan & Pratinjau Subtitle Video", use_container_width=True)
-            else:
-                sub_ctx = st.expander("🎨 Pengaturan & Pratinjau Subtitle Video", expanded=False)
-
-            with sub_ctx:
+            with st.popover("🎨 Pengaturan & Pratinjau Subtitle Video", use_container_width=True):
                 st.caption(
                     "💡 **Komponen Pendukung**: Subtitle otomatis dipecah menjadi 1 baris kalimat ringkas "
                     "dan ditempatkan tepat di margin bawah agar tidak menutupi form modal atau tombol video."
@@ -852,51 +821,6 @@ with tab_timeline:
             status_color = "🟢 Pas di slot" if est_sec <= dur_slot + 0.8 else "🟡 Akan di-Auto-Fit ke slot durasi"
             st.caption(f"**{w_cnt} kata** (~{est_sec} dtk bicara normal) • {status_color}")
 
-            # Fitur Unggulan Eleven v4: Ekspresi Audio & Auto-tag (Crash-Proof, Tanpa Nested Columns)
-            if hasattr(st, "popover"):
-                exp_container = st.popover("🎭 Selipkan Tag Ekspresi (Eleven v4)", use_container_width=True)
-            else:
-                exp_container = st.expander("🎭 Selipkan Tag Ekspresi (Eleven v4)", expanded=False)
-
-            with exp_container:
-                if st.button("✨ Auto-tag Baris Ini", key=f"btn_autotag_row_{bver}_{idx}", use_container_width=True, help="Otomatis sematkan tag ekspresi yang cocok untuk kalimat ini"):
-                    tagged_val = auto_tag_text(vo_val)
-                    updated_segments_copy = list(updated_segments)
-                    updated_segments_copy.append({"time_range": t_val, "visual": vis_val, "text": tagged_val})
-                    for rem_i in range(idx + 1, len(st.session_state.timeline_segments)):
-                        updated_segments_copy.append(st.session_state.timeline_segments[rem_i])
-                    set_storyboard_segments(updated_segments_copy)
-                    st.rerun()
-
-                sel_tag = st.selectbox(
-                    "🔍 Cari & Pilih Tag Ekspresi:",
-                    options=ALL_EXPRESSION_CHOICES,
-                    index=0,
-                    key=f"sel_tag_{bver}_{idx}",
-                    help="Ketik atau pilih tag ekspresi vokal Eleven v4 untuk langsung disematkan ke naskah",
-                )
-                if st.button("➕ Sisipkan Tag Terpilih", key=f"btn_insert_tag_{bver}_{idx}", use_container_width=True, help="Sisipkan tag ekspresi yang dipilih ke awal kalimat naskah"):
-                    if sel_tag and not sel_tag.startswith("--"):
-                        raw_tag = sel_tag.split(" — ")[0].strip()
-                        cur_t = vo_val.strip()
-                        new_t = f"{raw_tag} {cur_t}".strip() if raw_tag not in cur_t else cur_t
-                        updated_segments_copy = list(updated_segments)
-                        updated_segments_copy.append({"time_range": t_val, "visual": vis_val, "text": new_t})
-                        for rem_i in range(idx + 1, len(st.session_state.timeline_segments)):
-                            updated_segments_copy.append(st.session_state.timeline_segments[rem_i])
-                        set_storyboard_segments(updated_segments_copy)
-                        st.session_state[f"sel_tag_{bver}_{idx}"] = ALL_EXPRESSION_CHOICES[0]
-                        st.rerun()
-
-                if st.button("🧹 Hapus Tag Baris Ini", key=f"btn_cleantag_row_{bver}_{idx}", use_container_width=True):
-                    stripped_val = strip_expression_tags(vo_val)
-                    updated_segments_copy = list(updated_segments)
-                    updated_segments_copy.append({"time_range": t_val, "visual": vis_val, "text": stripped_val})
-                    for rem_i in range(idx + 1, len(st.session_state.timeline_segments)):
-                        updated_segments_copy.append(st.session_state.timeline_segments[rem_i])
-                    set_storyboard_segments(updated_segments_copy)
-                    st.rerun()
-
         with c4:
             b_u, b_d = st.columns(2)
             with b_u:
@@ -1208,48 +1132,14 @@ with tab_single_tts:
 
     with col_left:
         st.subheader("📝 Naskah Bebas (Tanpa Pembagian Segmen Waktu)")
-        single_default_txt = st.session_state.get(
-            "single_tts_custom_text",
-            (
+        tts_text = st.text_area(
+            "Masukkan teks yang ingin diubah menjadi suara:",
+            value=(
                 "Selamat datang di panduan penggunaan Cetakia Printing Enterprise Portal. "
                 "Pada video kali ini, kita akan mempelajari langkah-langkah untuk menambahkan komponen baru ke dalam sistem."
             ),
+            height=180,
         )
-        tts_text = st.text_area(
-            "Masukkan teks yang ingin diubah menjadi suara:",
-            value=single_default_txt,
-            height=160,
-            key="single_tts_input_area",
-        )
-
-        if hasattr(st, "popover"):
-            popover_single = st.popover("🎭 Selipkan Tag Ekspresi (Eleven v4)", use_container_width=True)
-        else:
-            popover_single = st.expander("🎭 Selipkan Tag Ekspresi (Eleven v4)", expanded=False)
-
-        with popover_single:
-            if st.button("✨ Auto-tag Teks Bebas", key="btn_autotag_single", use_container_width=True):
-                st.session_state["single_tts_custom_text"] = auto_tag_text(tts_text)
-                st.rerun()
-
-            sel_single_tag = st.selectbox(
-                "🔍 Cari & Pilih Tag Ekspresi:",
-                options=ALL_EXPRESSION_CHOICES,
-                index=0,
-                key="sel_single_tag_choice",
-                help="Ketik atau pilih tag ekspresi vokal Eleven v4 untuk langsung disematkan ke naskah",
-            )
-            if st.button("➕ Sisipkan Tag Terpilih", key="btn_insert_single_tag", use_container_width=True, help="Sisipkan tag ekspresi yang dipilih ke awal naskah"):
-                if sel_single_tag and not sel_single_tag.startswith("--"):
-                    raw_tag = sel_single_tag.split(" — ")[0].strip()
-                    cur = tts_text.strip()
-                    st.session_state["single_tts_custom_text"] = f"{raw_tag} {cur}".strip() if raw_tag not in cur else cur
-                    st.session_state["sel_single_tag_choice"] = ALL_EXPRESSION_CHOICES[0]
-                    st.rerun()
-
-            if st.button("🧹 Hapus Tag", key="btn_cleantag_single", use_container_width=True):
-                st.session_state["single_tts_custom_text"] = strip_expression_tags(tts_text)
-                st.rerun()
         selected_output_format = st.selectbox(
             "Format Output Audio:",
             options=list(OUTPUT_FORMATS.keys()),
