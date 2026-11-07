@@ -644,7 +644,7 @@ with tab_timeline:
             act_vpath = st.session_state.get("active_video_path")
             tl_res_state = st.session_state.get("last_timeline_result")
             dubbed_vpath_state = tl_res_state.get("dubbed_video_path") if tl_res_state else None
-            has_dubbed_ready = bool(dubbed_vpath_state and os.path.exists(dubbed_vpath_state))
+            has_dubbed_ready = bool(dubbed_vpath_state and os.path.exists(dubbed_vpath_state) and os.path.getsize(dubbed_vpath_state) > 0)
 
             if act_vpath and os.path.exists(act_vpath):
                 cur_seek = int(st.session_state.get("video_seek_time", 0))
@@ -1013,7 +1013,7 @@ with tab_timeline:
 
         # Tampilkan Status Video Final Dubbing jika video acuan aktif
         dub_vpath = tl_res.get("dubbed_video_path")
-        if dub_vpath and os.path.exists(dub_vpath):
+        if dub_vpath and os.path.exists(dub_vpath) and os.path.getsize(dub_vpath) > 0:
             st.markdown("---")
             st.markdown("### 🎬 Video Final + Voice Over Terpadu & Subtitle (Bottom Center)")
             st.success(
@@ -1028,7 +1028,7 @@ with tab_timeline:
         elif st.session_state.get("active_video_path"):
             st.warning(
                 "⚠️ Video acuan terdeteksi, namun proses penggabungan video (dubbing) tidak menghasilkan file video. "
-                "Sistem membutuhkan FFmpeg aktif untuk menggabungkan audio dan video."
+                "Sistem membutuhkan engine video (FFmpeg atau GStreamer) yang aktif untuk menggabungkan audio dan video."
             )
 
         # Opsi Unduh Terpadu On-Demand (Mengirim 1 file saja saat dipilih, tidak membebani WebSocket)
@@ -1041,7 +1041,7 @@ with tab_timeline:
                 "⏱️ Subtitle Sinkron (.SRT)",
                 "🎼 Master Uncompressed (.WAV)",
             ]
-            if dub_vpath and os.path.exists(dub_vpath):
+            if dub_vpath and os.path.exists(dub_vpath) and os.path.getsize(dub_vpath) > 0:
                 dl_opts.insert(0, "🎬 Video Final Dubbing (.MP4)")
 
             chosen_dl = st.selectbox("Pilih File yang Ingin Diunduh:", options=dl_opts, key="sb_chosen_dl")

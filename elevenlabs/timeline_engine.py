@@ -1644,23 +1644,73 @@ def get_video_resolution(video_path: str) -> Tuple[int, int]:
     if not video_path or not os.path.exists(video_path):
         return 1920, 1080
     try:
-        # 1. Coba ffmpeg
-        res = subprocess.run(["ffmpeg", "-i", video_path], capture_output=True, text=True, timeout=10)
-        m = re.search(r",\s*(\d{3,4})x(\d{3,4})\b", res.stderr or "")
-        if m:
-            return int(m.group(1)), int(m.group(2))
+        # 1. Coba ffmpeg jika tersedia
+        if shutil.which("ffmpeg"):
+            res = subprocess.run(["ffmpeg", "-i", video_path], capture_output=True, text=True, timeout=10)
+            m = re.search(r",\s*(\d{2,5})x(\d{2,5})\b", res.stderr or "")
+            if m:
+                return int(m.group(1)), int(m.group(2))
     except Exception:
         pass
     try:
-        # 2. Coba gst-discoverer
-        res = subprocess.run(["gst-discoverer-1.0", video_path], capture_output=True, text=True, timeout=10)
-        m_w = re.search(r"Width:\s*(\d+)", res.stdout or "")
-        m_h = re.search(r"Height:\s*(\d+)", res.stdout or "")
-        if m_w and m_h:
-            return int(m_w.group(1)), int(m_h.group(1))
+        # 2. Coba gst-discoverer jika tersedia
+        if shutil.which("gst-discoverer-1.0"):
+            res = subprocess.run(["gst-discoverer-1.0", video_path], capture_output=True, text=True, timeout=10)
+            m_w = re.search(r"Width:\s*(\d+)", res.stdout or "")
+            m_h = re.search(r"Height:\s*(\d+)", res.stdout or "")
+            if m_w and m_h:
+                return int(m_w.group(1)), int(m_h.group(1))
     except Exception:
         pass
     return 1920, 1080
+
+
+def get_video_codec(video_path: str) -> str:
+    """
+    Mendeteksi video codec ('h264', 'h265', atau 'unknown')
+    agar engine GStreamer atau FFmpeg memilih demuxer, parser, dan decoder yang tepat.
+    """
+    if not video_path or not os.path.exists(video_path):
+        return "h264"
+    # 1. Coba gst-discoverer jika tersedia (sangat cepat di Linux)
+    try:
+        if shutil.which("gst-discoverer-1.0"):
+            res = subprocess.run(["gst-discoverer-1.0", video_path], capture_output=True, text=True, timeout=5)
+            out = (res.stdout or "").lower()
+            if "h.265" in out or "hevc" in out:
+                return "h265"
+            if "h.264" in out or "avc" in out:
+                return "h264"
+    except Exception:
+        pass
+    # 2. Coba ffmpeg jika tersedia
+    try:
+        if shutil.which("ffmpeg"):
+            res = subprocess.run(["ffmpeg", "-i", video_path], capture_output=True, text=True, timeout=5)
+            err = (res.stderr or "").lower()
+            if "hevc" in err or "h.265" in err or "h265" in err:
+                return "h265"
+            if "h264" in err or "h.264" in err or "avc" in err:
+                return "h264"
+    except Exception:
+        pass
+    # 3. Quick binary inspection pada header/footer atom MP4 (fallback instan tanpa dependency)
+    try:
+        size = os.path.getsize(video_path)
+        with open(video_path, "rb") as f:
+            head = f.read(min(size, 262144))
+            tail = b""
+            if size > 262144:
+                f.seek(max(0, size - 524288))
+                tail = f.read(524288)
+            combined = head + tail
+            if b"hvc1" in combined or b"hev1" in combined:
+                return "h265"
+            if b"avc1" in combined:
+                return "h264"
+    except Exception:
+        pass
+    return "h264"
 
 
 def convert_srt_to_ass_file(
@@ -2128,47 +2178,72 @@ def mux_audio_to_video(
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
+    # Bersihkan file output sebelumnya jika ada file berukuran 0 byte
+    if os.path.exists(output_path) and os.path.getsize(output_path) == 0:
+        try:
+            os.remove(output_path)
+        except Exception:
+            pass
+
     has_ffmpeg = bool(shutil.which("ffmpeg"))
     has_gstreamer = bool(shutil.which("gst-launch-1.0"))
+
+    # Ambil durasi dan parameter sinkronisasi
+    v_dur = get_video_duration_seconds(video_path)
+    a_dur = get_audio_duration_seconds(audio_path)
+    target_dur = a_dur if a_dur > 0 else v_dur
+
+    # Jika audio lebih panjang dari video, tahan (freeze/clone) frame terakhir video
+    # agar seluruh kalimat narasi Voice Over selesai diucapkan tanpa ada yang terpotong.
+    v_pad_sec = 0.0
+    if v_dur > 0 and a_dur > v_dur + 0.05:
+        v_pad_sec = round(a_dur - v_dur + 0.05, 2)
+
+    # Jika video lebih panjang dari audio, pad audio dengan jeda hening agar video tidak terpotong
+    a_pad_sec = 0.0
+    if a_dur > 0 and v_dur > a_dur + 0.05:
+        a_pad_sec = round(v_dur - a_dur + 0.05, 2)
+        target_dur = v_dur
+
+    # Resolusi & Codec Safety:
+    # Standarkan resolusi maksimal ke 1080p (1920x1080) agar ramah memori RAM (<1GB di Streamlit Cloud)
+    # serta mencegah crash OOM saat pengguna mengunggah video 4K atau 8K.
+    vid_w, vid_h = get_video_resolution(video_path)
+    max_w, max_h = 1920, 1080
+    if vid_w > max_w or vid_h > max_h:
+        ratio = min(max_w / vid_w, max_h / vid_h)
+        target_w = int(round(vid_w * ratio / 2)) * 2
+        target_h = int(round(vid_h * ratio / 2)) * 2
+    else:
+        target_w = int(round(vid_w / 2)) * 2
+        target_h = int(round(vid_h / 2)) * 2
+    needs_downscale = (target_w != vid_w or target_h != vid_h)
+
+    v_codec = get_video_codec(video_path)
 
     # ==========================================================
     # ENGINE 1: FFMPEG (Production / Cloud Standard)
     # ==========================================================
     if has_ffmpeg:
-        v_dur = get_video_duration_seconds(video_path)
-        a_dur = get_audio_duration_seconds(audio_path)
-        target_dur = a_dur if a_dur > 0 else v_dur
-
-        # Jika audio lebih panjang dari video, tahan (freeze/clone) frame terakhir video
-        # agar seluruh kalimat narasi Voice Over selesai diucapkan tanpa ada yang terpotong.
-        v_pad_sec = 0.0
-        if v_dur > 0 and a_dur > v_dur + 0.05:
-            v_pad_sec = round(a_dur - v_dur + 0.05, 2)
-
-        # Jika video lebih panjang dari audio, pad audio dengan jeda hening agar video tidak terpotong
-        a_pad_sec = 0.0
-        if a_dur > 0 and v_dur > a_dur + 0.05:
-            a_pad_sec = round(v_dur - a_dur + 0.05, 2)
-            target_dur = v_dur
-
         # A. Coba mux + burn-in subtitle via FFmpeg jika diaktifkan
         if burn_subtitles and subtitle_path and os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0:
             temp_ass = None
             temp_srt = None
             try:
-                vid_w, vid_h = get_video_resolution(video_path)
                 temp_ass = os.path.join(tempfile.gettempdir(), f"sub_{int(time.time()*1000)}.ass")
                 converted = convert_srt_to_ass_file(
                     srt_path=subtitle_path,
                     ass_path=temp_ass,
-                    video_w=vid_w,
-                    video_h=vid_h,
+                    video_w=target_w,
+                    video_h=target_h,
                     subtitle_style=subtitle_style,
                     font_size=font_size,
                     ypad=ypad,
                 )
 
                 vf_chain = []
+                if needs_downscale:
+                    vf_chain.append(f"scale={target_w}:{target_h}")
                 if v_pad_sec > 0:
                     vf_chain.append(f"tpad=stop_mode=clone:stop_duration={v_pad_sec}")
 
@@ -2181,7 +2256,6 @@ def mux_audio_to_video(
                     shutil.copy2(subtitle_path, temp_srt)
                     safe_srt_path = temp_srt.replace("\\", "/").replace(":", "\\:")
                     font_name = "Liberation Sans"
-                    # Karena libass default 288p, pada 1080p scaling adalah 3.75x. Maka outline 0.48 * 3.75 ~ 1.8px (sangat halus)
                     if subtitle_style == "shaded_box":
                         style_str = (
                             f"FontName={font_name},FontSize={font_size},PrimaryColour=&H00FFFFFF&,"
@@ -2255,9 +2329,14 @@ def mux_audio_to_video(
                 "-i", video_path,
                 "-i", audio_path,
             ]
-            if v_pad_sec > 0:
+            if v_pad_sec > 0 or needs_downscale:
+                vf_fast = []
+                if needs_downscale:
+                    vf_fast.append(f"scale={target_w}:{target_h}")
+                if v_pad_sec > 0:
+                    vf_fast.append(f"tpad=stop_mode=clone:stop_duration={v_pad_sec}")
                 cmd_ff_fast.extend([
-                    "-vf", f"tpad=stop_mode=clone:stop_duration={v_pad_sec}",
+                    "-vf", ",".join(vf_fast),
                     "-c:v", "libx264",
                     "-preset", "ultrafast",
                     "-threads", "1",
@@ -2293,6 +2372,14 @@ def mux_audio_to_video(
     # ENGINE 2: GSTREAMER (Local Linux / Fallback)
     # ==========================================================
     if has_gstreamer:
+        gst_parse = "h265parse" if v_codec == "h265" else "h264parse"
+        gst_dec = "avdec_h265" if v_codec == "h265" else "avdec_h264"
+        gst_scale = (
+            ["videoscale", "!", f"video/x-raw,width={target_w},height={target_h}", "!"]
+            if needs_downscale
+            else []
+        )
+
         # A. GStreamer with subtitle overlay
         if burn_subtitles and subtitle_path and os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0:
             try:
@@ -2331,7 +2418,8 @@ def mux_audio_to_video(
                     "mp4mux", "name=mux", "faststart=true", "!", "filesink", f"location={output_path}",
                     "filesrc", f"location={subtitle_path}", "!", "subparse", "!", "overlay.text_sink",
                     "filesrc", f"location={video_path}", "!", "qtdemux", "name=demux",
-                    "demux.video_0", "!", "h264parse", "!", "avdec_h264", "!",
+                    "demux.video_0", "!", gst_parse, "!", gst_dec, "!",
+                    *gst_scale,
                     "textoverlay", "name=overlay", *overlay_props, "!",
                     "videoconvert", "!", "x264enc", "speed-preset=veryfast", "bitrate=2500", "tune=zerolatency", "!", "h264parse", "!", "mux.video_0",
                     "filesrc", f"location={audio_path}", "!", "mpegaudioparse", "!", "queue", "!", "mux.audio_0"
@@ -2339,23 +2427,47 @@ def mux_audio_to_video(
                 res = subprocess.run(cmd_sub, capture_output=True, timeout=90)
                 if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     return True
+                else:
+                    err_msg = res.stderr.decode('utf-8', errors='ignore') if res.stderr else "GStreamer overlay non-zero return"
+                    print(f"[mux_audio_to_video] GStreamer sub overlay gagal: {err_msg[:200]}")
             except Exception as e:
                 print(f"[mux_audio_to_video] GStreamer sub overlay gagal: {e}")
 
-        # B. GStreamer fast stream-copy
+        # B. GStreamer fast stream-copy (atau transcode jika codec bukan H.264 atau butuh downscale)
         try:
-            cmd_fast = [
-                "gst-launch-1.0", "-q",
-                "mp4mux", "name=mux", "faststart=true", "!", "filesink", f"location={output_path}",
-                "filesrc", f"location={video_path}", "!", "qtdemux", "name=demux",
-                "demux.video_0", "!", "queue", "!", "h264parse", "!", "mux.video_0",
-                "filesrc", f"location={audio_path}", "!", "mpegaudioparse", "!", "queue", "!", "mux.audio_0"
-            ]
+            if needs_downscale or v_codec != "h264":
+                cmd_fast = [
+                    "gst-launch-1.0", "-q",
+                    "mp4mux", "name=mux", "faststart=true", "!", "filesink", f"location={output_path}",
+                    "filesrc", f"location={video_path}", "!", "qtdemux", "name=demux",
+                    "demux.video_0", "!", gst_parse, "!", gst_dec, "!",
+                    *gst_scale,
+                    "videoconvert", "!", "x264enc", "speed-preset=veryfast", "bitrate=2500", "tune=zerolatency", "!", "h264parse", "!", "mux.video_0",
+                    "filesrc", f"location={audio_path}", "!", "mpegaudioparse", "!", "queue", "!", "mux.audio_0"
+                ]
+            else:
+                cmd_fast = [
+                    "gst-launch-1.0", "-q",
+                    "mp4mux", "name=mux", "faststart=true", "!", "filesink", f"location={output_path}",
+                    "filesrc", f"location={video_path}", "!", "qtdemux", "name=demux",
+                    "demux.video_0", "!", "queue", "!", gst_parse, "!", "mux.video_0",
+                    "filesrc", f"location={audio_path}", "!", "mpegaudioparse", "!", "queue", "!", "mux.audio_0"
+                ]
             res = subprocess.run(cmd_fast, capture_output=True, timeout=60)
             if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return True
+            else:
+                err_msg = res.stderr.decode('utf-8', errors='ignore') if res.stderr else "GStreamer stream-copy non-zero return"
+                print(f"[mux_audio_to_video] GStreamer stream-copy gagal: {err_msg[:200]}")
         except Exception as e:
             print(f"[mux_audio_to_video] GStreamer stream-copy gagal: {e}")
+
+    # Bersihkan file output jika gagal atau 0 byte agar tidak merusak UI Streamlit
+    if os.path.exists(output_path) and os.path.getsize(output_path) == 0:
+        try:
+            os.remove(output_path)
+        except Exception:
+            pass
 
     print(f"[mux_audio_to_video] Error: Tidak ada engine video (FFmpeg atau GStreamer) yang berhasil.")
     return False
@@ -2694,7 +2806,10 @@ def generate_timeline_voiceover(
             font_size=subtitle_font_size,
             ypad=subtitle_ypad,
         ):
-            dubbed_video_path = dub_path
+            if os.path.exists(dub_path) and os.path.getsize(dub_path) > 0:
+                dubbed_video_path = dub_path
+            else:
+                dubbed_video_path = None
 
     # Format penamaan video saat diunduh pengguna: "TANGGAL-NAMA_FITUR.mp4"
     date_tag = ts[:8] if len(ts) >= 8 else datetime.now().strftime("%Y%m%d")
