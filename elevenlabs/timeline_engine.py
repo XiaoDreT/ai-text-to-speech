@@ -1561,10 +1561,11 @@ def extract_video_thumbnail(
             try:
                 cmd_ff = [
                     "ffmpeg", "-y",
+                    "-threads", "1",
                     "-ss", tc_formatted,
                     "-i", video_path,
                     "-vframes", "1",
-                    "-vf", f"scale={output_size}:-1",
+                    "-vf", f"scale={output_size}:-1:flags=fast_bilinear",
                     "-threads", "1",
                     "-q:v", "3",
                     target_path,
@@ -1934,10 +1935,11 @@ def generate_subtitle_preview_image(
                     try:
                         cmd_ff = [
                             "ffmpeg", "-y",
+                            "-threads", "1",
                             "-ss", tc_fmt,
                             "-i", chosen_vpath,
                             "-vframes", "1",
-                            "-vf", f"scale={output_width}:-1",
+                            "-vf", f"scale={output_width}:-1:flags=fast_bilinear",
                             "-threads", "1",
                             "-q:v", "3",
                             raw_frame_path,
@@ -2245,7 +2247,7 @@ def mux_audio_to_video(
 
                 vf_chain = []
                 if needs_downscale:
-                    vf_chain.append(f"scale={target_w}:{target_h}")
+                    vf_chain.append(f"scale={target_w}:{target_h}:flags=fast_bilinear")
                 if v_pad_sec > 0:
                     vf_chain.append(f"tpad=stop_mode=clone:stop_duration={v_pad_sec}")
 
@@ -2280,8 +2282,10 @@ def mux_audio_to_video(
 
                 vf_full = ",".join(vf_chain)
 
+                # Batasi thread decoder & encoder ke 1 thread agar tidak terjadi lonjakan memori (OOM) di cloud container
                 cmd_ff_sub = [
                     "ffmpeg", "-y",
+                    "-threads", "1",
                     "-i", video_path,
                     "-i", audio_path,
                     "-vf", vf_full,
@@ -2308,7 +2312,8 @@ def mux_audio_to_video(
 
                 cmd_ff_sub.append(output_path)
 
-                res = subprocess.run(cmd_ff_sub, capture_output=True, timeout=120)
+                dynamic_timeout = max(360, int(target_dur * 4))
+                res = subprocess.run(cmd_ff_sub, capture_output=True, timeout=dynamic_timeout)
                 if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     return True
                 else:
@@ -2332,13 +2337,14 @@ def mux_audio_to_video(
         try:
             cmd_ff_fast = [
                 "ffmpeg", "-y",
+                "-threads", "1",
                 "-i", video_path,
                 "-i", audio_path,
             ]
             if v_pad_sec > 0 or needs_downscale:
                 vf_fast = []
                 if needs_downscale:
-                    vf_fast.append(f"scale={target_w}:{target_h}")
+                    vf_fast.append(f"scale={target_w}:{target_h}:flags=fast_bilinear")
                 if v_pad_sec > 0:
                     vf_fast.append(f"tpad=stop_mode=clone:stop_duration={v_pad_sec}")
                 cmd_ff_fast.extend([
@@ -2369,7 +2375,8 @@ def mux_audio_to_video(
 
             cmd_ff_fast.append(output_path)
 
-            res = subprocess.run(cmd_ff_fast, capture_output=True, timeout=60)
+            dynamic_timeout = max(360, int(target_dur * 4))
+            res = subprocess.run(cmd_ff_fast, capture_output=True, timeout=dynamic_timeout)
             if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return True
             else:
@@ -2389,6 +2396,7 @@ def mux_audio_to_video(
             if needs_downscale
             else []
         )
+        dynamic_timeout = max(360, int(target_dur * 4))
 
         # A. GStreamer with subtitle overlay
         if burn_subtitles and subtitle_path and os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0:
@@ -2424,17 +2432,17 @@ def mux_audio_to_video(
                     ])
 
                 cmd_sub = [
-                    "gst-launch-1.0", "-q",
+                    "gst-launch-1.0", "-e", "-q",
                     "mp4mux", "name=mux", "faststart=true", "!", "filesink", f"location={output_path}",
                     "filesrc", f"location={subtitle_path}", "!", "subparse", "!", "overlay.text_sink",
                     "filesrc", f"location={video_path}", "!", "qtdemux", "name=demux",
                     "demux.video_0", "!", gst_parse, "!", gst_dec, "!",
                     *gst_scale,
                     "textoverlay", "name=overlay", *overlay_props, "!",
-                    "videoconvert", "!", "x264enc", "speed-preset=veryfast", "bitrate=2500", "tune=zerolatency", "!", "h264parse", "!", "mux.video_0",
+                    "videoconvert", "!", "x264enc", "speed-preset=ultrafast", "bitrate=2500", "tune=zerolatency", "!", "h264parse", "!", "mux.video_0",
                     "filesrc", f"location={audio_path}", "!", "mpegaudioparse", "!", "queue", "!", "mux.audio_0"
                 ]
-                res = subprocess.run(cmd_sub, capture_output=True, timeout=90)
+                res = subprocess.run(cmd_sub, capture_output=True, timeout=dynamic_timeout)
                 if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     return True
                 else:
@@ -2447,23 +2455,23 @@ def mux_audio_to_video(
         try:
             if needs_downscale or v_codec != "h264":
                 cmd_fast = [
-                    "gst-launch-1.0", "-q",
+                    "gst-launch-1.0", "-e", "-q",
                     "mp4mux", "name=mux", "faststart=true", "!", "filesink", f"location={output_path}",
                     "filesrc", f"location={video_path}", "!", "qtdemux", "name=demux",
                     "demux.video_0", "!", gst_parse, "!", gst_dec, "!",
                     *gst_scale,
-                    "videoconvert", "!", "x264enc", "speed-preset=veryfast", "bitrate=2500", "tune=zerolatency", "!", "h264parse", "!", "mux.video_0",
+                    "videoconvert", "!", "x264enc", "speed-preset=ultrafast", "bitrate=2500", "tune=zerolatency", "!", "h264parse", "!", "mux.video_0",
                     "filesrc", f"location={audio_path}", "!", "mpegaudioparse", "!", "queue", "!", "mux.audio_0"
                 ]
             else:
                 cmd_fast = [
-                    "gst-launch-1.0", "-q",
+                    "gst-launch-1.0", "-e", "-q",
                     "mp4mux", "name=mux", "faststart=true", "!", "filesink", f"location={output_path}",
                     "filesrc", f"location={video_path}", "!", "qtdemux", "name=demux",
                     "demux.video_0", "!", "queue", "!", gst_parse, "!", "mux.video_0",
                     "filesrc", f"location={audio_path}", "!", "mpegaudioparse", "!", "queue", "!", "mux.audio_0"
                 ]
-            res = subprocess.run(cmd_fast, capture_output=True, timeout=60)
+            res = subprocess.run(cmd_fast, capture_output=True, timeout=dynamic_timeout)
             if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return True
             else:

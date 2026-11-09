@@ -618,7 +618,14 @@ with tab_timeline:
             if uploaded_video is not None:
                 vid_save_dir = os.path.join(client.output_dir, "uploaded_videos")
                 os.makedirs(vid_save_dir, exist_ok=True)
-                target_vpath = os.path.join(vid_save_dir, uploaded_video.name)
+                # Sanitasi nama file di disk agar terbebas dari karakter khusus (#, %, spasi, kutip)
+                # yang dapat memicu URL fragment issue di GStreamer atau argumen parser FFmpeg
+                raw_name = uploaded_video.name
+                base_n, ext_n = os.path.splitext(raw_name)
+                clean_base = re.sub(r"[^\w\-]+", "_", base_n).strip("_") or "uploaded_video"
+                safe_vid_filename = f"{clean_base}{ext_n}"
+                target_vpath = os.path.join(vid_save_dir, safe_vid_filename)
+
                 # Tulis file secara streaming hemat memori (hanya jika belum tersimpan dengan ukuran yang sama)
                 file_already_saved = (
                     os.path.exists(target_vpath)
@@ -634,9 +641,8 @@ with tab_timeline:
                     st.session_state.active_video_name = uploaded_video.name
                     st.session_state.active_video_duration = get_video_duration_seconds(target_vpath)
                     st.session_state.video_seek_time = 0
-                    safe_vn = re.sub(r"[^\w\-]+", "_", os.path.splitext(uploaded_video.name)[0]).strip("_")
-                    if safe_vn and not safe_vn.lower().startswith("whatsapp"):
-                        st.session_state.feature_name = safe_vn
+                    if clean_base and not clean_base.lower().startswith("whatsapp"):
+                        st.session_state.feature_name = clean_base
                     gc.collect()
                     st.rerun()
 
@@ -1041,7 +1047,7 @@ with tab_timeline:
         elif st.session_state.get("active_video_path"):
             st.warning(
                 "⚠️ Video acuan terdeteksi, namun proses penggabungan video (dubbing) tidak menghasilkan file video. "
-                "Sistem membutuhkan engine video (FFmpeg atau GStreamer) yang aktif untuk menggabungkan audio dan video."
+                "Master audio (.MP3) dan subtitle (.SRT) di atas tetap berhasil dibuat dan dapat Anda unduh secara normal."
             )
 
         # Opsi Unduh Terpadu On-Demand (Mengirim 1 file saja saat dipilih, tidak membebani WebSocket)
