@@ -3,8 +3,8 @@ port = 8501
 enableCORS = false
 enableXsrfProtection = true
 fileWatcherType = "none"
-maxUploadSize = 100
-maxMessageSize = 50
+maxUploadSize = 300
+maxMessageSize = 100
 
 [browser]
 gatherUsageStats = false

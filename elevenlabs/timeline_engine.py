@@ -1565,6 +1565,7 @@ def extract_video_thumbnail(
                     "-i", video_path,
                     "-vframes", "1",
                     "-vf", f"scale={output_size}:-1",
+                    "-threads", "1",
                     "-q:v", "3",
                     target_path,
                 ]
@@ -1937,6 +1938,7 @@ def generate_subtitle_preview_image(
                             "-i", chosen_vpath,
                             "-vframes", "1",
                             "-vf", f"scale={output_width}:-1",
+                            "-threads", "1",
                             "-q:v", "3",
                             raw_frame_path,
                         ]

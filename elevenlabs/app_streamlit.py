@@ -12,6 +12,7 @@ Mendukung:
 import os
 import io
 import re
+import gc
 import html
 import json
 import shutil
@@ -593,7 +594,7 @@ with tab_timeline:
                 "Pilih File Video (.mp4, .mov, .mkv, .webm)",
                 type=["mp4", "mov", "mkv", "webm"],
                 key="storyboard_video_uploader",
-                help="Video ini akan ditampilkan cuplikannya pada kolom 'Arahan Visual (Adegan Video)' per segmen dan dapat digabungkan langsung dengan audio Voice Over (Dubbing).",
+                help="Mendukung video hingga 300MB. Sistem otomatis menggunakan buffer streaming disk 64KB dan pembebasan RAM instan agar bebas dari OOM.",
             )
             v_btn1, v_btn2 = st.columns(2)
             with v_btn1:
@@ -626,6 +627,7 @@ with tab_timeline:
                 if not file_already_saved:
                     with open(target_vpath, "wb") as f:
                         shutil.copyfileobj(uploaded_video, f, length=65536)
+                    gc.collect()
 
                 if st.session_state.get("active_video_path") != target_vpath:
                     st.session_state.active_video_path = target_vpath
@@ -635,13 +637,15 @@ with tab_timeline:
                     safe_vn = re.sub(r"[^\w\-]+", "_", os.path.splitext(uploaded_video.name)[0]).strip("_")
                     if safe_vn and not safe_vn.lower().startswith("whatsapp"):
                         st.session_state.feature_name = safe_vn
+                    gc.collect()
                     st.rerun()
 
             if st.session_state.get("active_video_path"):
                 v_dur = st.session_state.get("active_video_duration", 0.0)
                 v_hms = format_seconds_to_hms(v_dur, True)
+                v_size_mb = os.path.getsize(st.session_state.active_video_path) / (1024 * 1024) if os.path.exists(st.session_state.active_video_path) else 0.0
                 st.info(
-                    f"🎥 **Video Aktif:** `{st.session_state.active_video_name}`  \n"
+                    f"🎥 **Video Aktif:** `{st.session_state.active_video_name}` ({v_size_mb:.1f} MB)  \n"
                     f"⏱️ **Total Durasi:** `{v_hms}` ({v_dur:.1f} detik)  \n"
                     f"✓ Cuplikan adegan otomatis muncul pada setiap baris Tabel Storyboard di bawah."
                 )
