@@ -14,6 +14,7 @@ import io
 import re
 import html
 import json
+import shutil
 import inspect
 from datetime import datetime
 import streamlit as st
@@ -617,9 +618,14 @@ with tab_timeline:
                 vid_save_dir = os.path.join(client.output_dir, "uploaded_videos")
                 os.makedirs(vid_save_dir, exist_ok=True)
                 target_vpath = os.path.join(vid_save_dir, uploaded_video.name)
-                # Tulis file secara streaming hemat memori
-                with open(target_vpath, "wb") as f:
-                    f.write(uploaded_video.getbuffer())
+                # Tulis file secara streaming hemat memori (hanya jika belum tersimpan dengan ukuran yang sama)
+                file_already_saved = (
+                    os.path.exists(target_vpath)
+                    and os.path.getsize(target_vpath) == uploaded_video.size
+                )
+                if not file_already_saved:
+                    with open(target_vpath, "wb") as f:
+                        shutil.copyfileobj(uploaded_video, f, length=65536)
 
                 if st.session_state.get("active_video_path") != target_vpath:
                     st.session_state.active_video_path = target_vpath
@@ -1023,8 +1029,11 @@ with tab_timeline:
                 f"di bagian atas (pilih opsi *'🎬 Video Final Dubbing'*), atau buka pemutar di bawah ini."
             )
             # Expander tertutup secara default agar hemat hardware video decoding surface di browser
-            with st.expander("📺 Buka Pemutar Video Dubbing di Sini (Opsional)", expanded=False):
-                st.video(dub_vpath)
+            with st.expander("📺 Buka Pemutar Video Dubbing Cadangan (Opsional)", expanded=False):
+                st.caption("💡 Video dubbing otomatis siap diputar langsung pada **Pemutar Video Utama** di bagian atas.")
+                load_extra_player = st.checkbox("Muat Pemutar Video di Sini", value=False, key="cb_load_extra_dubbed")
+                if load_extra_player:
+                    st.video(dub_vpath)
         elif st.session_state.get("active_video_path"):
             st.warning(
                 "⚠️ Video acuan terdeteksi, namun proses penggabungan video (dubbing) tidak menghasilkan file video. "

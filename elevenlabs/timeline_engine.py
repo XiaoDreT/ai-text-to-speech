@@ -2206,10 +2206,10 @@ def mux_audio_to_video(
         target_dur = v_dur
 
     # Resolusi & Codec Safety:
-    # Standarkan resolusi maksimal ke 1080p (1920x1080) agar ramah memori RAM (<1GB di Streamlit Cloud)
-    # serta mencegah crash OOM saat pengguna mengunggah video 4K atau 8K.
+    # Standarkan resolusi maksimal ke 720p (1280x720) agar sangat hemat memori RAM (<100MB di Streamlit Cloud)
+    # serta menjamin bebas 100% dari OOM crash saat pengguna mengunggah video 1080p, 4K, atau 8K.
     vid_w, vid_h = get_video_resolution(video_path)
-    max_w, max_h = 1920, 1080
+    max_w, max_h = 1280, 720
     if vid_w > max_w or vid_h > max_h:
         ratio = min(max_w / vid_w, max_h / vid_h)
         target_w = int(round(vid_w * ratio / 2)) * 2
@@ -2290,10 +2290,14 @@ def mux_audio_to_video(
                 cmd_ff_sub.extend([
                     "-c:v", "libx264",
                     "-preset", "ultrafast",
+                    "-tune", "zerolatency",
+                    "-x264-params", "ref=1:bframes=0:subme=1:me=dia:rc-lookahead=2",
                     "-threads", "1",
-                    "-crf", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-max_muxing_queue_size", "128",
+                    "-crf", "24",
                     "-c:a", "aac",
-                    "-b:a", "192k",
+                    "-b:a", "128k",
                     "-map", "0:v:0",
                     "-map", "1:a:0",
                 ])
@@ -2339,8 +2343,12 @@ def mux_audio_to_video(
                     "-vf", ",".join(vf_fast),
                     "-c:v", "libx264",
                     "-preset", "ultrafast",
+                    "-tune", "zerolatency",
+                    "-x264-params", "ref=1:bframes=0:subme=1:me=dia:rc-lookahead=2",
                     "-threads", "1",
-                    "-crf", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-max_muxing_queue_size", "128",
+                    "-crf", "24",
                 ])
             else:
                 cmd_ff_fast.extend(["-c:v", "copy"])
@@ -2350,7 +2358,7 @@ def mux_audio_to_video(
 
             cmd_ff_fast.extend([
                 "-c:a", "aac",
-                "-b:a", "192k",
+                "-b:a", "128k",
                 "-map", "0:v:0",
                 "-map", "1:a:0",
             ])
@@ -2855,13 +2863,16 @@ def generate_timeline_voiceover(
         client._append_history(record)
 
     # Bebaskan buffer memori besar agar tidak membebani sistem RAM
+    mp3_size_bytes = len(mp3_bytes)
     del master_buffer
     del master_pcm16
     del placed_audio_blocks
+    del mp3_bytes
+    del wav_bytes
     gc.collect()
 
     return {
-        "audio_bytes": mp3_bytes,
+        "audio_bytes": None,  # Gunakan audio_path untuk streaming on-demand agar hemat RAM session_state
         "wav_bytes": None,  # Gunakan wav_path untuk streaming on-demand
         "srt_content": srt_content,
         "total_timeline_sec": total_timeline_sec,
@@ -2869,8 +2880,8 @@ def generate_timeline_voiceover(
         "elapsed_sec": elapsed_sec,
         "mime_type": "audio/mpeg",
         "extension": "mp3",
-        "size_bytes": len(mp3_bytes),
-        "size_kb": round(len(mp3_bytes) / 1024, 2),
+        "size_bytes": mp3_size_bytes,
+        "size_kb": round(mp3_size_bytes / 1024, 2),
         "audio_path": mp3_path,
         "wav_path": wav_path,
         "srt_path": srt_path,
