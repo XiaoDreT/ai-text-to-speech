@@ -39,6 +39,32 @@ Proyek **Text-to-Speech (TTS) Studio** berbasis Python yang mengadaptasi fitur p
 
 ---
 
+## 🔑 Autorisasi & Keamanan ElevenLabs API Key
+
+Sistem mendukung 3 metode autorisasi API Key yang **100% aman dan tidak akan mengekspos API Key Anda ke repositori publik**:
+
+1. **Formulir Input Langsung di Web UI (Paling Praktis untuk Pengguna)**:
+   - Masukkan API Key Anda pada formulir di halaman utama atau di sidebar (**🎚️ Pengaturan Studio > 🔑 Autorisasi ElevenLabs API**).
+   - Form input menggunakan tipe *password* (tersamar) sehingga aman saat berbagi layar.
+   - API Key **hanya disimpan dalam memori sesi browser Anda (`st.session_state`)** dan tidak pernah ditulis ke file atau diunggah ke publik.
+
+2. **Streamlit Community Cloud Secrets (Rekomendasi Deployment Cloud)**:
+   - Bagi pemilik aplikasi di [Streamlit Community Cloud](https://share.streamlit.io):
+   - Masuk ke dashboard Streamlit Cloud > Pilih aplikasi (`xiaodre-ai`) > **Settings** > **Secrets**.
+   - Tambahkan:
+     ```toml
+     ELEVENLABS_API_KEY = "xi-api-key-rahasia-anda"
+     ```
+   - Aplikasi akan otomatis membaca API Key tanpa harus menginput setiap sesi dan tanpa membuat key menjadi publik di repositori GitHub.
+
+3. **Environment Variable (Server / Local Development)**:
+   - Ekspor variabel sebelum menjalankan Streamlit:
+     ```bash
+     export ELEVENLABS_API_KEY="xi-api-key-rahasia-anda"
+     ```
+
+---
+
 ## 🚀 Cara Menjalankan
 
 Masuk ke direktori `elevenlabs`:

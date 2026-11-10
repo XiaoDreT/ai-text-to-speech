@@ -92,8 +92,34 @@ MODEL_DESCRIPTIONS = {
 
 
 # ==========================================================
-# Fungsi Cache untuk Mengambil Data dari ElevenLabs API
+# Fungsi Manajemen API Key & Cache ElevenLabs API
 # ==========================================================
+def get_configured_api_key() -> str:
+    """
+    Mengambil API Key ElevenLabs dengan urutan prioritas:
+    1. Input pengguna dalam sesi browser aktif (st.session_state["elevenlabs_api_key"])
+    2. Streamlit Secrets (st.secrets["ELEVENLABS_API_KEY"]) untuk deploy Streamlit Cloud
+    3. Environment variable ELEVENLABS_API_KEY
+    4. DEFAULT_API_KEY
+    """
+    if "elevenlabs_api_key" in st.session_state and st.session_state["elevenlabs_api_key"]:
+        return str(st.session_state["elevenlabs_api_key"]).strip()
+
+    try:
+        if "ELEVENLABS_API_KEY" in st.secrets:
+            return str(st.secrets["ELEVENLABS_API_KEY"]).strip()
+        if "elevenlabs" in st.secrets and "api_key" in st.secrets["elevenlabs"]:
+            return str(st.secrets["elevenlabs"]["api_key"]).strip()
+    except Exception:
+        pass
+
+    env_val = os.getenv("ELEVENLABS_API_KEY", "").strip()
+    if env_val:
+        return env_val
+
+    return (DEFAULT_API_KEY or "").strip()
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_workspace_voices(api_key: str):
     client = ElevenLabsStudioClient(api_key=api_key)
@@ -146,175 +172,320 @@ def set_storyboard_segments(new_segments: list):
 # ==========================================================
 # Sidebar: Pengaturan Suara, Model, dan Parameter
 # ==========================================================
+current_api_key = get_configured_api_key()
+has_api_key = bool(current_api_key)
+voices_list = []
+models_list = []
+api_error = None
+
 with st.sidebar:
     st.header("🎚️ Pengaturan Studio")
 
-    # API Key dibaca secara privat dari Environment Variable atau konfigurasi backend (tidak diekspos ke UI)
-    api_key = os.getenv("ELEVENLABS_API_KEY", DEFAULT_API_KEY)
-
-    if st.button("🔄 Refresh Suara Workspace", **ST_STRETCH):
-        fetch_workspace_voices.clear()
-        fetch_available_models.clear()
-        st.rerun()
-
-    voices_list = []
-    models_list = []
-    api_error = None
-    try:
-        voices_list = fetch_workspace_voices(api_key)
-        models_list = fetch_available_models(api_key)
-    except Exception as e:
-        api_error = str(e)
-
-    if api_error:
-        st.error(f"Gagal memuat data workspace: {api_error}")
-        st.stop()
-
-    category_filter = st.selectbox(
-        "Filter Kategori Suara",
-        options=[
-            "Semua Suara Workspace",
-            "🌟 Suara Saya (Cloned - Zen)",
-            "🎙️ Suara Profesional Workspace",
-            "🌐 Suara Bawaan (Premade)",
-        ],
-        index=0,
-    )
-
-    if category_filter == "🌟 Suara Saya (Cloned - Zen)":
-        filtered_voices = [v for v in voices_list if v.get("category") == "cloned"]
-    elif category_filter == "🎙️ Suara Profesional Workspace":
-        filtered_voices = [v for v in voices_list if v.get("category") == "professional"]
-    elif category_filter == "🌐 Suara Bawaan (Premade)":
-        filtered_voices = [v for v in voices_list if v.get("category") == "premade"]
-    else:
-        filtered_voices = voices_list
-
-    if not filtered_voices:
-        filtered_voices = voices_list
-
-    voice_options_map = {format_voice_label(v): v for v in filtered_voices}
-
-    # Otomatis pilih suara Zen (3OAL9h0y2edOwGJbMU4X) sebagai default terpilih
-    default_voice_idx = 0
-    for idx_v, (lbl, v_obj) in enumerate(voice_options_map.items()):
-        if v_obj.get("voice_id") == ZEN_PRIMARY_VOICE_ID or v_obj.get("name", "").strip().lower() == "zen":
-            default_voice_idx = idx_v
-            break
-
-    selected_voice_label = st.selectbox(
-        "Pilih Suara (Voice)",
-        options=list(voice_options_map.keys()),
-        index=default_voice_idx,
-        help="Suara hasil kloning Anda ('Zen') ditempatkan di urutan paling atas dan otomatis menjadi default voice over.",
-    )
-    selected_voice = voice_options_map[selected_voice_label]
-    selected_voice_id = selected_voice["voice_id"]
-
-    with st.expander("🔊 Info & Sampel Suara Terpilih", expanded=True):
-        v_labels = selected_voice.get("labels") or {}
+    # ======================================================
+    # Form Input Autorisasi API Key ElevenLabs (Privat)
+    # ======================================================
+    with st.expander("🔑 Autorisasi ElevenLabs API", expanded=not has_api_key):
         st.markdown(
-            f"**Nama:** `{selected_voice.get('name')}`  \n"
-            f"**Voice ID:** `{selected_voice_id}`  \n"
-            f"**Kategori:** `{selected_voice.get('category', 'unknown').upper()}`  \n"
-            f"**Bahasa/Aksen:** `{v_labels.get('language', '-')}` / `{v_labels.get('accent', '-')}`"
+            "Masukkan ElevenLabs API Key Anda untuk menghubungkan model AI dan suara workspace. "
+            "Key disimpan secara aman di browser (`session_state`) dan **tidak akan diekspos ke repositori publik/GitHub**."
         )
-        preview_url = selected_voice.get("preview_url")
-        if preview_url:
-            st.caption("Putar sampel suara asli:")
-            st.audio(preview_url)
+
+        with st.form("sidebar_api_key_form"):
+            input_key = st.text_input(
+                "ElevenLabs API Key",
+                value=current_api_key,
+                type="password",
+                placeholder="sk_... atau xi-api-key-...",
+                help="Dapatkan API Key di https://elevenlabs.io -> Profile Settings -> API Keys",
+            )
+            col_k1, col_k2 = st.columns([1, 1])
+            save_clicked = col_k1.form_submit_button("💾 Terapkan", **ST_STRETCH)
+            clear_clicked = col_k2.form_submit_button("🗑️ Reset", **ST_STRETCH)
+
+            if save_clicked:
+                clean_k = input_key.strip()
+                st.session_state["elevenlabs_api_key"] = clean_k
+                fetch_workspace_voices.clear()
+                fetch_available_models.clear()
+                st.rerun()
+
+            if clear_clicked:
+                st.session_state["elevenlabs_api_key"] = ""
+                fetch_workspace_voices.clear()
+                fetch_available_models.clear()
+                st.rerun()
+
+        if has_api_key:
+            masked = f"{current_api_key[:4]}••••{current_api_key[-4:]}" if len(current_api_key) >= 8 else "••••••••"
+            st.success(f"Status: Terhubung (`{masked}`)")
+        else:
+            st.warning("Status: Menunggu API Key")
+
+    if not has_api_key:
+        st.info("💡 Silakan masukkan API Key pada formulir di atas untuk mengaktifkan kontrol studio suara.")
+    else:
+        if st.button("🔄 Refresh Suara Workspace", **ST_STRETCH):
+            fetch_workspace_voices.clear()
+            fetch_available_models.clear()
+            st.rerun()
+
+        try:
+            voices_list = fetch_workspace_voices(current_api_key)
+            models_list = fetch_available_models(current_api_key)
+        except Exception as e:
+            api_error = str(e)
+            fetch_workspace_voices.clear()
+            fetch_available_models.clear()
+
+        if api_error:
+            st.error("❌ Gagal memuat data ElevenLabs")
+            if "401" in api_error or "Unauthorized" in api_error:
+                st.warning("API Key tidak valid atau tidak memiliki izin akses (401 Unauthorized). Silakan periksa kembali API Key Anda pada formulir di atas.")
+            else:
+                st.caption(f"Detail: {api_error}")
+        else:
+            category_filter = st.selectbox(
+                "Filter Kategori Suara",
+                options=[
+                    "Semua Suara Workspace",
+                    "🌟 Suara Saya (Cloned - Zen)",
+                    "🎙️ Suara Profesional Workspace",
+                    "🌐 Suara Bawaan (Premade)",
+                ],
+                index=0,
+            )
+
+            if category_filter == "🌟 Suara Saya (Cloned - Zen)":
+                filtered_voices = [v for v in voices_list if v.get("category") == "cloned"]
+            elif category_filter == "🎙️ Suara Profesional Workspace":
+                filtered_voices = [v for v in voices_list if v.get("category") == "professional"]
+            elif category_filter == "🌐 Suara Bawaan (Premade)":
+                filtered_voices = [v for v in voices_list if v.get("category") == "premade"]
+            else:
+                filtered_voices = voices_list
+
+            if not filtered_voices:
+                filtered_voices = voices_list
+
+            voice_options_map = {format_voice_label(v): v for v in filtered_voices}
+
+            # Otomatis pilih suara Zen (3OAL9h0y2edOwGJbMU4X) sebagai default terpilih
+            default_voice_idx = 0
+            for idx_v, (lbl, v_obj) in enumerate(voice_options_map.items()):
+                if v_obj.get("voice_id") == ZEN_PRIMARY_VOICE_ID or v_obj.get("name", "").strip().lower() == "zen":
+                    default_voice_idx = idx_v
+                    break
+
+            selected_voice_label = st.selectbox(
+                "Pilih Suara (Voice)",
+                options=list(voice_options_map.keys()),
+                index=default_voice_idx,
+                help="Suara hasil kloning Anda ('Zen') ditempatkan di urutan paling atas dan otomatis menjadi default voice over.",
+            )
+            selected_voice = voice_options_map[selected_voice_label]
+            selected_voice_id = selected_voice["voice_id"]
+
+            with st.expander("🔊 Info & Sampel Suara Terpilih", expanded=True):
+                v_labels = selected_voice.get("labels") or {}
+                st.markdown(
+                    f"**Nama:** `{selected_voice.get('name')}`  \n"
+                    f"**Voice ID:** `{selected_voice_id}`  \n"
+                    f"**Kategori:** `{selected_voice.get('category', 'unknown').upper()}`  \n"
+                    f"**Bahasa/Aksen:** `{v_labels.get('language', '-')}` / `{v_labels.get('accent', '-')}`"
+                )
+                preview_url = selected_voice.get("preview_url")
+                if preview_url:
+                    st.caption("Putar sampel suara asli:")
+                    st.audio(preview_url)
+
+            st.markdown("---")
+            st.subheader("🧠 Model AI ElevenLabs")
+
+            model_ids = [m["model_id"] for m in models_list] if models_list else list(MODEL_DESCRIPTIONS.keys())
+            default_model_idx = (
+                model_ids.index("eleven_v4") if "eleven_v4" in model_ids
+                else (model_ids.index("eleven_multilingual_v2") if "eleven_multilingual_v2" in model_ids else 0)
+            )
+
+            selected_model_id = st.selectbox(
+                "Pilih Model TTS",
+                options=model_ids,
+                index=default_model_idx,
+                format_func=lambda mid: MODEL_DESCRIPTIONS.get(mid, mid),
+            )
+
+            LANGUAGE_OPTIONS = {
+                "id": "🇮🇩 Bahasa Indonesia (id)",
+                "auto": "🌐 Auto-Detect (Deteksi Otomatis Bahasa)",
+                "en": "🇺🇸 English (en)",
+                "zh": "🇨🇳 Mandarin / Chinese (zh)",
+                "ja": "🇯🇵 Japanese / 日本語 (ja)",
+                "ko": "🇰🇷 Korean / 한국어 (ko)",
+                "es": "🇪🇸 Spanish / Español (es)",
+                "fr": "🇫🇷 French / Français (fr)",
+                "de": "🇩🇪 German / Deutsch (de)",
+                "ar": "🇸🇦 Arabic / العربية (ar)",
+                "pt": "🇧🇷 Portuguese / Português (pt)",
+                "ru": "🇷🇺 Russian / Русский (ru)",
+                "it": "🇮🇹 Italian / Italiano (it)",
+                "hi": "🇮🇳 Hindi / हिन्दी (hi)",
+                "nl": "🇳🇱 Dutch / Nederlands (nl)",
+                "tr": "🇹🇷 Turkish / Türkçe (tr)",
+                "pl": "🇵🇱 Polish / Polski (pl)",
+                "sv": "🇸🇪 Swedish / Svenska (sv)",
+                "vi": "🇻🇳 Vietnamese / Tiếng Việt (vi)",
+                "tl": "🇵🇭 Filipino / Tagalog (tl)",
+                "th": "🇹🇭 Thai / ไทย (th)",
+                "ms": "🇲🇾 Bahasa Melayu (ms)",
+            }
+
+            selected_lang_code = st.selectbox(
+                "🌐 Bahasa Suara (Language)",
+                options=list(LANGUAGE_OPTIONS.keys()),
+                index=0,
+                format_func=lambda code: LANGUAGE_OPTIONS.get(code, code),
+                help="Pilih bahasa voice over ElevenLabs (Eleven v4, Multilingual v2, Turbo v2.5 mendukung puluhan bahasa dunia).",
+            )
+
+            st.markdown("---")
+            st.subheader("🎛️ Parameter Voice Settings")
+
+            stability = st.slider(
+                "Stability (Stabilitas)",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.55,
+                step=0.05,
+                help="Untuk karakter suara semi-formal, tegas, ramah, dan konsisten (0.50 - 0.65 sangat disarankan).",
+            )
+
+            similarity_boost = st.slider(
+                "Similarity Boost (Kemiripan Suara Asli)",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.80,
+                step=0.05,
+                help="Menentukan seberapa dekat hasil suara dengan karakter asli suara kloning 'Zen'.",
+            )
+
+            style_exaggeration = st.slider(
+                "Style Exaggeration (Penekanan Gaya)",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.00,
+                step=0.05,
+            )
+
+            speed = st.slider(
+                "Base Speed (Kecepatan Dasar)",
+                min_value=0.70,
+                max_value=1.20,
+                value=1.00,
+                step=0.05,
+                help="Kecepatan dasar bicara (1.00 = normal).",
+            )
+
+            use_speaker_boost = st.checkbox(
+                "Aktifkan Speaker Boost",
+                value=True,
+            )
+
+# ==========================================================
+# Validasi Status API Key & Otorisasi di Halaman Utama
+# ==========================================================
+if not has_api_key:
+    st.title("🎙️ ElevenLabs AI Voice Studio")
+    st.info("👋 **Selamat datang di ElevenLabs AI Voice Studio!**")
+
+    st.markdown(
+        """
+        ### 🔑 Masukkan API Key ElevenLabs untuk Memulai
+        Aplikasi ini membutuhkan **ElevenLabs API Key** untuk mengakses model AI, memuat daftar suara kustom/workspace, dan menghasilkan audio voice over berkualitas studio.
+
+        > 🛡️ **Jaminan Keamanan & Privasi:**
+        > - **Aman (Masked Password):** Kolom input disamarkan seperti kata sandi sehingga API Key tidak terlihat di layar atau saat berbagi layar/rekaman video.
+        > - **Tersimpan Privat di Sesi Anda:** Key hanya disimpan di memori browser Anda (`st.session_state`) selama sesi aktif.
+        > - **Bebas Publikasi:** API Key **TIDAK PERNAH** disimpan ke file publik, commit git, atau repositori GitHub publik.
+        """
+    )
+
+    with st.container():
+        st.subheader("Form Input API Key")
+        with st.form("main_welcome_api_key_form"):
+            main_input_key = st.text_input(
+                "Masukkan ElevenLabs API Key Anda:",
+                type="password",
+                placeholder="Contoh: sk_abae... atau xi-api-key-...",
+                help="Buka https://elevenlabs.io -> Klik avatar profil -> API Keys untuk menyalin API Key Anda.",
+            )
+            sub_col1, _ = st.columns([1, 2])
+            if sub_col1.form_submit_button("🚀 Hubungkan & Buka Studio", **ST_STRETCH):
+                clean_main_key = main_input_key.strip()
+                if clean_main_key:
+                    st.session_state["elevenlabs_api_key"] = clean_main_key
+                    fetch_workspace_voices.clear()
+                    fetch_available_models.clear()
+                    st.rerun()
+                else:
+                    st.error("API Key tidak boleh kosong.")
 
     st.markdown("---")
-    st.subheader("🧠 Model AI ElevenLabs")
-
-    model_ids = [m["model_id"] for m in models_list] if models_list else list(MODEL_DESCRIPTIONS.keys())
-    default_model_idx = (
-        model_ids.index("eleven_v4") if "eleven_v4" in model_ids
-        else (model_ids.index("eleven_multilingual_v2") if "eleven_multilingual_v2" in model_ids else 0)
+    st.markdown(
+        """
+        #### 💡 Panduan untuk Pemilik Deployment (Streamlit Community Cloud):
+        Jika Anda adalah pengembang yang meng-host aplikasi ini di **Streamlit Community Cloud** (`share.streamlit.io`) dan ingin agar aplikasi langsung memiliki API Key tanpa perlu mengetik ulang setiap sesi baru:
+        1. Buka dashboard aplikasi Anda di [share.streamlit.io](https://share.streamlit.io).
+        2. Pilih aplikasi Anda (`xiaodre-ai`), klik **Settings** > **Secrets**.
+        3. Tambahkan baris berikut:
+           ```toml
+           ELEVENLABS_API_KEY = "masukkan_api_key_elevenlabs_anda_disini"
+           ```
+        4. Klik **Save**. Streamlit akan menyuntikkan key tersebut langsung ke backend secara aman tanpa pernah membuat API Key menjadi publik di GitHub.
+        """
     )
+    st.stop()
 
-    selected_model_id = st.selectbox(
-        "Pilih Model TTS",
-        options=model_ids,
-        index=default_model_idx,
-        format_func=lambda mid: MODEL_DESCRIPTIONS.get(mid, mid),
-    )
+if api_error:
+    st.title("🎙️ ElevenLabs AI Voice Studio")
+    st.error(f"❌ **Otorisasi ElevenLabs Gagal:** {api_error}")
+    if "401" in api_error or "Unauthorized" in api_error:
+        st.markdown(
+            """
+            > **Peringatan Otorisasi (401 Unauthorized):**  
+            > Server ElevenLabs menolak API Key yang diberikan. Kemungkinan penyebab:
+            > 1. API Key salah disalin, tidak lengkap, atau memiliki spasi ekstra.
+            > 2. API Key telah dicabut, ditangguhkan, atau kuota akun habis.
+            > 
+            > Silakan periksa kembali API Key Anda di dashboard [ElevenLabs](https://elevenlabs.io) dan masukkan ulang di bawah ini:
+            """
+        )
+    with st.form("error_retry_api_key_form"):
+        retry_key_input = st.text_input(
+            "Masukkan Ulang ElevenLabs API Key:",
+            type="password",
+            placeholder="sk_... atau xi-api-key-...",
+        )
+        col_r1, col_r2 = st.columns([1, 1])
+        if col_r1.form_submit_button("🔄 Perbarui & Coba Lagi", **ST_STRETCH):
+            if retry_key_input.strip():
+                st.session_state["elevenlabs_api_key"] = retry_key_input.strip()
+                fetch_workspace_voices.clear()
+                fetch_available_models.clear()
+                st.rerun()
+            else:
+                st.error("API Key tidak boleh kosong.")
+        if col_r2.form_submit_button("🗑️ Reset Key", **ST_STRETCH):
+            st.session_state["elevenlabs_api_key"] = ""
+            fetch_workspace_voices.clear()
+            fetch_available_models.clear()
+            st.rerun()
+    st.stop()
 
-    LANGUAGE_OPTIONS = {
-        "id": "🇮🇩 Bahasa Indonesia (id)",
-        "auto": "🌐 Auto-Detect (Deteksi Otomatis Bahasa)",
-        "en": "🇺🇸 English (en)",
-        "zh": "🇨🇳 Mandarin / Chinese (zh)",
-        "ja": "🇯🇵 Japanese / 日本語 (ja)",
-        "ko": "🇰🇷 Korean / 한국어 (ko)",
-        "es": "🇪🇸 Spanish / Español (es)",
-        "fr": "🇫🇷 French / Français (fr)",
-        "de": "🇩🇪 German / Deutsch (de)",
-        "ar": "🇸🇦 Arabic / العربية (ar)",
-        "pt": "🇧🇷 Portuguese / Português (pt)",
-        "ru": "🇷🇺 Russian / Русский (ru)",
-        "it": "🇮🇹 Italian / Italiano (it)",
-        "hi": "🇮🇳 Hindi / हिन्दी (hi)",
-        "nl": "🇳🇱 Dutch / Nederlands (nl)",
-        "tr": "🇹🇷 Turkish / Türkçe (tr)",
-        "pl": "🇵🇱 Polish / Polski (pl)",
-        "sv": "🇸🇪 Swedish / Svenska (sv)",
-        "vi": "🇻🇳 Vietnamese / Tiếng Việt (vi)",
-        "tl": "🇵🇭 Filipino / Tagalog (tl)",
-        "th": "🇹🇭 Thai / ไทย (th)",
-        "ms": "🇲🇾 Bahasa Melayu (ms)",
-    }
+if not voices_list:
+    st.warning("Workspace terhubung tetapi tidak ada data suara yang ditemukan di akun ElevenLabs Anda.")
+    st.stop()
 
-    selected_lang_code = st.selectbox(
-        "🌐 Bahasa Suara (Language)",
-        options=list(LANGUAGE_OPTIONS.keys()),
-        index=0,
-        format_func=lambda code: LANGUAGE_OPTIONS.get(code, code),
-        help="Pilih bahasa voice over ElevenLabs (Eleven v4, Multilingual v2, Turbo v2.5 mendukung puluhan bahasa dunia).",
-    )
-
-    st.markdown("---")
-    st.subheader("🎛️ Parameter Voice Settings")
-
-    stability = st.slider(
-        "Stability (Stabilitas)",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.55,
-        step=0.05,
-        help="Untuk karakter suara semi-formal, tegas, ramah, dan konsisten (0.50 - 0.65 sangat disarankan).",
-    )
-
-    similarity_boost = st.slider(
-        "Similarity Boost (Kemiripan Suara Asli)",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.80,
-        step=0.05,
-        help="Menentukan seberapa dekat hasil suara dengan karakter asli suara kloning 'Zen'.",
-    )
-
-    style_exaggeration = st.slider(
-        "Style Exaggeration (Penekanan Gaya)",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.00,
-        step=0.05,
-    )
-
-    speed = st.slider(
-        "Base Speed (Kecepatan Dasar)",
-        min_value=0.70,
-        max_value=1.20,
-        value=1.00,
-        step=0.05,
-        help="Kecepatan dasar bicara (1.00 = normal).",
-    )
-
-    use_speaker_boost = st.checkbox(
-        "Aktifkan Speaker Boost",
-        value=True,
-    )
+api_key = current_api_key
 
 # ==========================================================
 # Header Utama
@@ -1248,9 +1419,13 @@ with tab_dialog:
                 second_vid = v["voice_id"]
                 break
 
+        first_vid = ZEN_PRIMARY_VOICE_ID
+        if voices_list and all(v["voice_id"] != ZEN_PRIMARY_VOICE_ID for v in voices_list):
+            first_vid = voices_list[0]["voice_id"]
+
         st.session_state.dialog_lines = [
             {
-                "voice_id": ZEN_PRIMARY_VOICE_ID,
+                "voice_id": first_vid,
                 "text": "Halo! Selamat datang di panduan interaktif Cetakia. Hari ini kita akan membahas cara menambahkan komponen baru.",
             },
             {

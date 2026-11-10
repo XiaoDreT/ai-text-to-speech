@@ -155,11 +155,34 @@ class ElevenLabsStudioClient:
     """Klien utama untuk berinteraksi dengan ElevenLabs API."""
 
     def __init__(self, api_key: Optional[str] = None, output_dir: Optional[str] = None):
-        self.api_key = (api_key or os.getenv("ELEVENLABS_API_KEY") or DEFAULT_API_KEY).strip()
+        resolved_key = (api_key or "").strip()
+        if not resolved_key:
+            # Cek Streamlit Secrets jika dijalankan di lingkungan Streamlit
+            try:
+                import streamlit as _st
+                if "ELEVENLABS_API_KEY" in _st.secrets:
+                    resolved_key = str(_st.secrets["ELEVENLABS_API_KEY"]).strip()
+                elif "elevenlabs" in _st.secrets and "api_key" in _st.secrets["elevenlabs"]:
+                    resolved_key = str(_st.secrets["elevenlabs"]["api_key"]).strip()
+            except Exception:
+                pass
+        if not resolved_key:
+            resolved_key = (os.getenv("ELEVENLABS_API_KEY") or DEFAULT_API_KEY or "").strip()
+
+        self.api_key = resolved_key
         self.base_url = BASE_URL
         self.output_dir = output_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
         os.makedirs(self.output_dir, exist_ok=True)
         self.history_file = os.path.join(self.output_dir, "history.json")
+
+    def _ensure_api_key(self):
+        """Memastikan API key tersedia sebelum melakukan panggilan HTTP."""
+        if not self.api_key:
+            raise ValueError(
+                "ElevenLabs API Key belum dikonfigurasi. "
+                "Silakan masukkan API Key Anda pada formulir otorisasi di sidebar aplikasi "
+                "atau atur variabel lingkungan ELEVENLABS_API_KEY."
+            )
 
     @property
     def headers(self) -> Dict[str, str]:
@@ -170,6 +193,7 @@ class ElevenLabsStudioClient:
 
     def get_models(self, tts_only: bool = True) -> List[Dict[str, Any]]:
         """Mengambil daftar model AI dari ElevenLabs."""
+        self._ensure_api_key()
         resp = requests.get(f"{self.base_url}/models", headers={"xi-api-key": self.api_key}, timeout=15)
         resp.raise_for_status()
         models = resp.json()
@@ -183,6 +207,7 @@ class ElevenLabsStudioClient:
         suara hasil kloning pengguna ('Zen' / category='cloned') berada di urutan paling atas,
         diikuti suara 'professional' (khususnya Bahasa Indonesia), lalu 'premade'.
         """
+        self._ensure_api_key()
         resp = requests.get(f"{self.base_url}/voices", headers={"xi-api-key": self.api_key}, timeout=15)
         resp.raise_for_status()
         voices = resp.json().get("voices", [])
@@ -214,6 +239,7 @@ class ElevenLabsStudioClient:
 
     def get_voice_details(self, voice_id: str) -> Dict[str, Any]:
         """Mengambil detail dan pengaturan default untuk satu suara tertentu."""
+        self._ensure_api_key()
         resp = requests.get(
             f"{self.base_url}/voices/{voice_id}",
             headers={"xi-api-key": self.api_key},
@@ -246,6 +272,7 @@ class ElevenLabsStudioClient:
         Menghasilkan audio Text-to-Speech dari teks menggunakan ElevenLabs API.
         Jika with_timestamps=True, juga menghasilkan data alignment karakter dan file subtitle .SRT.
         """
+        self._ensure_api_key()
         voice_settings: Dict[str, Any] = {
             "stability": round(float(stability), 2),
             "similarity_boost": round(float(similarity_boost), 2),
@@ -424,6 +451,7 @@ class ElevenLabsStudioClient:
         output_format: str = "mp3_44100_128",
     ) -> Generator[bytes, None, None]:
         """Mengalirkan (stream) potongan byte audio secara real-time dari ElevenLabs."""
+        self._ensure_api_key()
         url = f"{self.base_url}/text-to-speech/{voice_id}/stream"
         payload = {
             "text": text,
