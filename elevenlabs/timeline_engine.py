@@ -686,52 +686,55 @@ def parse_pdf_storyboard(pdf_bytes: bytes) -> List[Dict[str, str]]:
     3. Ekstraksi teks layout-mode via pypdf / pdftotext
     4. Parser naskah fleksibel ber-delimiter (Pipe |, Tab \\t, Multi-Spasi)
     """
-    # 1. Coba ekstraksi koordinat presisi dengan pdftotext -bbox (poppler-utils)
-    rows = _parse_pdf_via_pdftotext_bbox(pdf_bytes)
-    if rows:
-        return rows
-
-    # 2. Coba ekstraksi koordinat presisi via pypdf visitor_text
-    rows = _parse_pdf_via_pypdf_coords(pdf_bytes)
-    if rows:
-        return rows
-
-    # 3. Fallback: Ekstrak teks dengan layout mode
-    extracted_text = ""
     try:
-        import pypdf
-        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-        extracted_text = "\n".join(
-            (page.extract_text(extraction_mode="layout") or page.extract_text() or "")
-            for page in reader.pages
-        )
-    except Exception:
-        pass
+        # 1. Coba ekstraksi koordinat presisi dengan pdftotext -bbox (poppler-utils)
+        rows = _parse_pdf_via_pdftotext_bbox(pdf_bytes)
+        if rows:
+            return rows
 
-    if not extracted_text:
+        # 2. Coba ekstraksi koordinat presisi via pypdf visitor_text
+        rows = _parse_pdf_via_pypdf_coords(pdf_bytes)
+        if rows:
+            return rows
+
+        # 3. Fallback: Ekstrak teks dengan layout mode
+        extracted_text = ""
         try:
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
-                tmp.write(pdf_bytes)
-                tmp.flush()
-                res = subprocess.run(["pdftotext", "-layout", tmp.name, "-"], capture_output=True, text=True, timeout=15)
-                if res.returncode == 0 and res.stdout.strip():
-                    extracted_text = res.stdout
+            import pypdf
+            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+            extracted_text = "\n".join(
+                (page.extract_text(extraction_mode="layout") or page.extract_text() or "")
+                for page in reader.pages
+            )
         except Exception:
             pass
 
-    if not extracted_text:
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
-                tmp.write(pdf_bytes)
-                tmp.flush()
-                res = subprocess.run(["pdftotext", tmp.name, "-"], capture_output=True, text=True, timeout=15)
-                if res.returncode == 0 and res.stdout.strip():
-                    extracted_text = res.stdout
-        except Exception:
-            pass
+        if not extracted_text:
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
+                    tmp.write(pdf_bytes)
+                    tmp.flush()
+                    res = subprocess.run(["pdftotext", "-layout", tmp.name, "-"], capture_output=True, text=True, timeout=15)
+                    if res.returncode == 0 and res.stdout.strip():
+                        extracted_text = res.stdout
+            except Exception:
+                pass
 
-    if extracted_text:
-        return parse_raw_timeline_text(extracted_text, auto_generate_if_no_timestamps=True)
+        if not extracted_text:
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
+                    tmp.write(pdf_bytes)
+                    tmp.flush()
+                    res = subprocess.run(["pdftotext", tmp.name, "-"], capture_output=True, text=True, timeout=15)
+                    if res.returncode == 0 and res.stdout.strip():
+                        extracted_text = res.stdout
+            except Exception:
+                pass
+
+        if extracted_text:
+            return parse_raw_timeline_text(extracted_text, auto_generate_if_no_timestamps=True)
+    except Exception as e:
+        logger.error(f"[parse_pdf_storyboard] Error parsing PDF: {e}")
 
     return []
 

@@ -438,24 +438,31 @@ with tab_timeline:
             )
 
             if auto_apply or reapply_clicked:
-                raw_bytes = uploaded_storyboard.getvalue()
-                parsed_rows = parse_any_storyboard_file(uploaded_storyboard.name, raw_bytes)
-                if parsed_rows:
-                    set_storyboard_segments(parsed_rows)
-                    st.session_state["last_uploaded_storyboard_sig"] = file_sig
-                    safe_fn = re.sub(r"[^\w\-]+", "_", os.path.splitext(uploaded_storyboard.name)[0]).strip("_")
-                    if safe_fn:
-                        st.session_state.feature_name = safe_fn
-                    st.session_state["upload_success_msg"] = (
-                        f"✓ Berhasil menerapkan **{len(parsed_rows)} baris segmen** dari `{uploaded_storyboard.name}` "
-                        f"sesuai template Tabel Storyboard (**Estimasi Waktu `HH:MM:SS` | Arahan Visual | Naskah Voice Over**)!"
-                    )
-                    st.rerun()
-                else:
-                    st.error(
-                        f"Gagal mengekstrak teks naskah dari `{uploaded_storyboard.name}`. "
-                        "Pastikan file tidak kosong atau terproteksi password."
-                    )
+                st.session_state["last_uploaded_storyboard_sig"] = file_sig
+                try:
+                    raw_bytes = uploaded_storyboard.getvalue()
+                    parsed_rows = parse_any_storyboard_file(uploaded_storyboard.name, raw_bytes)
+                    del raw_bytes
+                    import gc
+                    gc.collect()
+
+                    if parsed_rows:
+                        set_storyboard_segments(parsed_rows)
+                        safe_fn = re.sub(r"[^\w\-]+", "_", os.path.splitext(uploaded_storyboard.name)[0]).strip("_")
+                        if safe_fn:
+                            st.session_state.feature_name = safe_fn
+                        st.session_state["upload_success_msg"] = (
+                            f"✓ Berhasil menerapkan **{len(parsed_rows)} baris segmen** dari `{uploaded_storyboard.name}` "
+                            f"ke Tabel Storyboard (**Estimasi Waktu `HH:MM:SS` | Arahan Visual | Naskah Voice Over**)!"
+                        )
+                        st.rerun()
+                    else:
+                        st.error(
+                            f"Gagal mengekstrak teks naskah dari `{uploaded_storyboard.name}`. "
+                            "Pastikan file berisi teks/tabel dan tidak terkunci sandi."
+                        )
+                except Exception as parse_err:
+                    st.error(f"Gagal memproses file `{uploaded_storyboard.name}`: {str(parse_err)}")
 
         if st.session_state.get("upload_success_msg"):
             st.success(st.session_state["upload_success_msg"])
@@ -757,17 +764,6 @@ with tab_timeline:
     hdr_c3.markdown("**🎙️ Naskah Voice Over (Audio)**")
     hdr_c4.markdown("**Aksi (Urutan / Hapus)**")
 
-    # Siapkan opsi dropdown timecode HH:MM:SS
-    extra_tcs = []
-    max_sec_found = 3600
-    for s in st.session_state.timeline_segments:
-        s_s, e_s = parse_time_range_str(s.get("time_range", ""))
-        max_sec_found = max(max_sec_found, int(e_s) + 120)
-        extra_tcs.append(format_seconds_to_hms(s_s, True))
-        extra_tcs.append(format_seconds_to_hms(e_s, True))
-
-    timecode_options = get_timecode_dropdown_options(max_seconds=max_sec_found, extra_timecodes=extra_tcs)
-
     bver = st.session_state.board_version
     updated_segments = []
     move_action = None
@@ -784,49 +780,39 @@ with tab_timeline:
             start_hms = format_seconds_to_hms(s_sec, True)
             end_hms = format_seconds_to_hms(e_sec, True)
 
-            if start_hms not in timecode_options:
-                timecode_options.append(start_hms)
-                timecode_options.sort()
-            if end_hms not in timecode_options:
-                timecode_options.append(end_hms)
-                timecode_options.sort()
-
-            start_idx = timecode_options.index(start_hms)
-            end_idx = timecode_options.index(end_hms)
-
             sub_t1, sub_t2 = st.columns(2)
             with sub_t1:
                 st.caption("🟢 **Mulai**")
-                s_val = st.selectbox(
+                s_val = st.text_input(
                     f"Mulai #{idx+1}",
-                    options=timecode_options,
-                    index=start_idx,
+                    value=start_hms,
                     key=f"tl_s_{bver}_{idx}",
                     label_visibility="collapsed",
-                    help="Pilih jam:menit:detik mulai (HH:MM:SS)",
+                    help="Format HH:MM:SS (contoh: 00:00:00)",
                 )
             with sub_t2:
                 st.caption("🔴 **Selesai**")
-                e_val = st.selectbox(
+                e_val = st.text_input(
                     f"Selesai #{idx+1}",
-                    options=timecode_options,
-                    index=end_idx,
+                    value=end_hms,
                     key=f"tl_e_{bver}_{idx}",
                     label_visibility="collapsed",
-                    help="Pilih jam:menit:detik selesai (HH:MM:SS)",
+                    help="Format HH:MM:SS (contoh: 00:00:05)",
                 )
 
             cur_s_sec = parse_timecode_to_seconds(s_val)
             cur_e_sec = parse_timecode_to_seconds(e_val)
+            norm_s_hms = format_seconds_to_hms(cur_s_sec, True)
+            norm_e_hms = format_seconds_to_hms(cur_e_sec, True)
             dur_slot = max(0.0, cur_e_sec - cur_s_sec)
 
             if cur_e_sec > cur_s_sec:
-                t_val = f"{s_val} - {e_val}"
+                t_val = f"{norm_s_hms} - {norm_e_hms}"
                 st.caption(f"✅ `{t_val}` *(Durasi: **{dur_slot:g} dtk**)*")
             else:
                 cur_e_sec = cur_s_sec + 1.0
-                e_adj_hms = format_seconds_to_hms(cur_e_sec, True)
-                t_val = f"{s_val} - {e_adj_hms}"
+                norm_e_hms = format_seconds_to_hms(cur_e_sec, True)
+                t_val = f"{norm_s_hms} - {norm_e_hms}"
                 st.caption(f"⚠️ Selesai ≤ Mulai *(Otomatis: **+{cur_e_sec - cur_s_sec:g} dtk**)*")
 
         with c2:

@@ -15,5 +15,10 @@ __pycache__/
 venv/
 env/
 
-# Environment variables
-.env
+# Environment variables & secrets
+.env*
+.streamlit/secrets.toml
+
+# Proyek Next.js (dipindahkan ke repo terpisah ai-voice-studio)
+elevenlabs-nextjs/
+
